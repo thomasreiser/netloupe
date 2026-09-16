@@ -2,28 +2,30 @@
 //! [+]`) and the pane sub-tabs below them.
 
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::Frame;
 
+use super::theme;
 use crate::app::{AppState, Pane};
 
 pub fn render_host_tabs(frame: &mut Frame, area: Rect, state: &AppState) {
     let mut spans: Vec<Span> = Vec::new();
     for (i, tab) in state.tabs.iter().enumerate() {
-        let label = format!(" {} ", tab.target.display());
-        let style = if i == state.active_tab {
-            Style::default()
-                .fg(Color::Black)
-                .bg(Color::Cyan)
-                .add_modifier(Modifier::BOLD)
+        if i > 0 {
+            spans.push(Span::raw(" "));
+        }
+        if i == state.active_tab {
+            spans.push(theme::pill(tab.target.display(), theme::CYAN));
         } else {
-            Style::default().fg(Color::Gray)
-        };
-        spans.push(Span::styled(format!("[{label}]"), style));
-        spans.push(Span::raw(" "));
+            spans.push(Span::styled(
+                format!(" {} ", tab.target.display()),
+                Style::default().fg(theme::MUTED),
+            ));
+        }
     }
-    spans.push(Span::styled("[+]", Style::default().fg(Color::DarkGray)));
+    spans.push(Span::raw("  "));
+    spans.push(Span::styled("+ new", Style::default().fg(theme::FAINT)));
     frame.render_widget(Line::from(spans), area);
 }
 
@@ -33,18 +35,19 @@ pub fn render_pane_tabs(frame: &mut Frame, area: Rect, state: &AppState) {
         return;
     };
     let mut spans: Vec<Span> = Vec::new();
-    for (i, pane) in Pane::ALL.iter().enumerate() {
+    for (i, &pane) in Pane::ALL.iter().enumerate() {
         if i > 0 {
-            spans.push(Span::raw(" │ "));
+            spans.push(Span::styled(" ", Style::default()));
         }
-        let style = if i == tab.active_pane {
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+        let accent = theme::pane_accent(pane);
+        if i == tab.active_pane {
+            spans.push(theme::pill(pane.label(), accent));
         } else {
-            Style::default().fg(Color::Gray)
-        };
-        spans.push(Span::styled(pane.label(), style));
+            spans.push(Span::styled(
+                format!(" {} ", pane.label()),
+                Style::default().fg(accent).add_modifier(Modifier::DIM),
+            ));
+        }
     }
     frame.render_widget(Line::from(spans), area);
 }

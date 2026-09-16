@@ -2,7 +2,7 @@
 //! the evidence list (see `TabState::show_evidence`).
 
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Color, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{List, ListItem};
 use ratatui::Frame;
@@ -11,7 +11,8 @@ use super::{empty_message, header_and_body};
 use crate::app::TabState;
 use crate::checks::CheckId;
 use crate::event::CheckUpdate;
-use crate::providers::{Confidence, Detection, Layer};
+use crate::providers::{Detection, Layer};
+use crate::ui::theme;
 
 pub fn render(frame: &mut Frame, area: Rect, tab: &TabState) {
     let body = header_and_body(frame, area, tab, &[CheckId::Hosting]);
@@ -41,32 +42,47 @@ pub fn render(frame: &mut Frame, area: Rect, tab: &TabState) {
         if group.is_empty() {
             continue;
         }
-        items.push(ListItem::new(Line::from(Span::styled(
-            layer_title(layer),
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(ratatui::style::Modifier::BOLD),
-        ))));
+        items.push(ListItem::new(Line::from(vec![
+            Span::styled(
+                "▍",
+                Style::default().fg(theme::pane_accent(crate::app::Pane::Hosting)),
+            ),
+            Span::styled(
+                format!(" {}", layer_title(layer)),
+                Style::default()
+                    .fg(theme::TEXT)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ])));
         for detection in group {
             items.push(ListItem::new(Line::from(vec![
-                Span::raw("  "),
+                Span::raw("    "),
                 Span::styled(
                     detection.provider_name.clone(),
-                    Style::default().add_modifier(ratatui::style::Modifier::BOLD),
+                    Style::default()
+                        .fg(theme::TEXT)
+                        .add_modifier(Modifier::BOLD),
                 ),
                 Span::raw("  "),
-                confidence_span(detection.confidence),
+                theme::pill(
+                    detection.confidence.to_string(),
+                    theme::confidence_color(detection.confidence),
+                ),
                 Span::styled(
-                    format!("  (score {})", detection.score),
-                    Style::default().fg(Color::DarkGray),
+                    format!("  score {}", detection.score),
+                    Style::default().fg(theme::MUTED),
                 ),
             ])));
             if tab.show_evidence {
                 for ev in &detection.evidence {
-                    items.push(ListItem::new(Line::from(Span::styled(
-                        format!("    • {} (+{})", ev.description, ev.weight),
-                        Style::default().fg(Color::DarkGray),
-                    ))));
+                    items.push(ListItem::new(Line::from(vec![
+                        Span::styled("      ▸ ", Style::default().fg(theme::FAINT)),
+                        Span::styled(ev.description.clone(), Style::default().fg(theme::MUTED)),
+                        Span::styled(
+                            format!(" +{}", ev.weight),
+                            Style::default().fg(theme::FAINT),
+                        ),
+                    ])));
                 }
             }
         }
@@ -93,13 +109,4 @@ fn layer_title(layer: Layer) -> &'static str {
         Layer::Mail => "MAIL",
         Layer::Saas => "USES (SaaS)",
     }
-}
-
-fn confidence_span(confidence: Confidence) -> Span<'static> {
-    let color = match confidence {
-        Confidence::High => Color::Green,
-        Confidence::Medium => Color::Yellow,
-        Confidence::Low => Color::DarkGray,
-    };
-    Span::styled(confidence.to_string(), Style::default().fg(color))
 }
