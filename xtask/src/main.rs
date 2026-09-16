@@ -12,6 +12,8 @@ use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use netloupe::providers::signatures;
 
+mod geo;
+
 #[derive(Parser)]
 #[command(name = "xtask")]
 struct Cli {
@@ -32,6 +34,10 @@ enum Command {
     /// TOML, compiles every glob pattern and regex, and checks that
     /// `header` signals have a `name` and every other kind has a `pattern`.
     LintSignatures,
+    /// Regenerates `data/geo/` (world coastline/border bitmaps + a
+    /// major-cities table) from Natural Earth's public-domain 1:110m
+    /// data, for the Geo pane's world map (`netloupe::worldmap`).
+    UpdateGeoData,
 }
 
 fn main() -> Result<()> {
@@ -41,6 +47,7 @@ fn main() -> Result<()> {
     match cli.command {
         Command::UpdateData { provider } => update_data(&repo_root, provider.as_deref()),
         Command::LintSignatures => lint_signatures(&repo_root),
+        Command::UpdateGeoData => geo::update_geo_data(&repo_root),
     }
 }
 

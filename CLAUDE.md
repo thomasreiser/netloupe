@@ -35,7 +35,7 @@ Guidance for Claude Code when working in this repository.
 | 7 | HTTP | Status, redirect chain, timing breakdown, security headers, per-version support table (HTTP/1.0, HTTP/1.1, HTTP/2 TLS, h2c, HTTP/3), plain-HTTP-on-port-80 reachability |
 | 8 | IP/ASN | ASN, prefix, RPKI state, RDAP (RIR, owner, abuse contact), IP class (private/CGNAT/bogon/anycast) |
 | 9 | Hosting | Detected cloud/CDN/hosting/DNS/mail providers, with layers and evidence (see below) |
-| 10 | Geo | Country/region/city, timezone, org, connection type, accuracy hint |
+| 10 | Geo | Country/region/city, timezone, org, connection type, accuracy hint, a low-resolution world map zoomed to the coordinate with a pinpoint and nearby major-city labels |
 | 11 | Rep | DNSBLs, Tor exit list, optional API providers |
 
 ## Hosting provider detection
@@ -157,6 +157,11 @@ Supported `format` values: `plain` (one CIDR per line), `aws-json`, `gcp-json`, 
 - Show the data age in the Hosting pane footer, and warn when it's older than 30 days (configurable).
 - Build one prefix trie per address family at startup, in a background task, from all providers. Lookups must be O(prefix length) and non-blocking.
 
+### Geo pane world map
+- Source: Natural Earth's public-domain 1:110m coastline, country-border, and populated-places vector data (the scale Natural Earth itself curates for small/low-res world maps), fetched by `cargo xtask update-geo-data` and committed to `data/geo/` -- there's no runtime download, unlike the provider-range cache above.
+- Coastlines and country-border outlines are rasterized at build-data time onto a 1-degree-per-cell world grid, packed one bit per cell (~8KB each): deliberately low-resolution and small, since the only consumer is a terminal pane. `data/geo/cities.csv` holds the populated-places table (name, lat, lon, population) as-is.
+- `src/worldmap.rs` embeds all three files and does the actual work: projecting a lat/lon window onto whatever grid size the pane currently has, picking the tightest preset zoom that still fits at least one major (population >= 1,000,000) city's label, and placing the pinpoint plus up to 5 city labels. Pure and synchronous -- no I/O, no ratatui -- so it's cheap enough to recompute on every render rather than caching.
+
 ## Tech stack
 
 - **Language:** Rust (stable, edition 2021)
@@ -187,11 +192,12 @@ src/
   config.rs
   geoip.rs             # Background GeoLite2 City/ASN downloader (MaxMind GeoIP Update API)
   retry.rs             # Jittered-backoff retry for calls to third-party helper APIs
+  worldmap.rs          # Pure ASCII world-map rendering (Geo pane): zoom/pin/city-label logic
   ui/                  # Rendering only; no I/O, no business logic
     mod.rs
     tabs.rs
     panes/             # one file per pane (overview.rs, dns.rs, hosting.rs, ...)
-    widgets/           # reusable widgets (sparkline, kv_table, status_badge, evidence_list)
+    widgets/           # reusable widgets (sparkline, kv_table, status_badge, evidence_list, worldmap)
   checks/              # One module per check; no ratatui imports here
     mod.rs             # Check trait + registry
     dns.rs
@@ -214,7 +220,8 @@ src/
 data/
   providers/           # *.toml signature files (embedded via include_str!/build.rs)
   snapshot/            # Bundled range-list snapshot (generated, committed)
-xtask/                 # cargo xtask update-data, lint-signatures
+  geo/                 # World-map bitmaps + cities.csv (generated, committed; see worldmap.rs)
+xtask/                 # cargo xtask update-data, update-geo-data, lint-signatures
 tests/
   fixtures/            # canned DNS responses, certs, HTTP responses, range-list samples
 ```
@@ -243,6 +250,7 @@ cargo run -- check example.com --resolver 1.1.1.1 --json # headless run against 
 cargo run -- update-data              # refresh provider range lists into the cache
 cargo xtask update-data               # regenerate the bundled snapshot in data/snapshot/
 cargo xtask lint-signatures           # validate all data/providers/*.toml
+cargo xtask update-geo-data           # regenerate data/geo/ (world map bitmaps + cities.csv)
 cargo test                            # unit + fixture tests (no network)
 cargo test -- --ignored               # network-dependent integration tests
 cargo clippy --all-targets -- -D warnings

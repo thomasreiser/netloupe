@@ -23,6 +23,12 @@ pub struct GeoResult {
     pub country_code: Option<String>,
     pub region: Option<String>,
     pub city: Option<String>,
+    /// Present whenever the City database found a record at all, even if
+    /// its `city`/`region` fields are blank -- this is what the Geo
+    /// pane's world map zooms to, so it must not depend on how much
+    /// other detail the database happened to have for this address.
+    pub lat: Option<f64>,
+    pub lon: Option<f64>,
     pub timezone: Option<String>,
     pub asn_org: Option<String>,
     pub accuracy_hint: Option<&'static str>,
@@ -114,6 +120,8 @@ struct CityFields {
     country_code: Option<String>,
     region: Option<String>,
     city: Option<String>,
+    lat: Option<f64>,
+    lon: Option<f64>,
     timezone: Option<String>,
 }
 
@@ -122,6 +130,8 @@ fn apply_city_fields(result: &mut GeoResult, fields: CityFields) {
     result.country_code = fields.country_code;
     result.region = fields.region;
     result.city = fields.city;
+    result.lat = fields.lat;
+    result.lon = fields.lon;
     result.timezone = fields.timezone;
     result.accuracy_hint =
         Some("city-level, as reported by the database; actual accuracy varies by region");
@@ -143,6 +153,8 @@ async fn lookup_city(path: PathBuf, ip: IpAddr) -> Result<Option<CityFields>, St
                 .and_then(|s| s.names.english)
                 .map(str::to_string),
             city: city.city.names.english.map(str::to_string),
+            lat: city.location.latitude,
+            lon: city.location.longitude,
             timezone: city.location.time_zone.map(str::to_string),
         }))
     })

@@ -37,9 +37,13 @@ GeoIP lookups need a MaxMind account: set `[geoip].account_id` /
 and netloupe downloads the GeoLite2 City/ASN databases itself, refreshing
 them on `[geoip].update_interval` (default 1 day). The current status (no
 credentials / updating / database age) shows in the bottom-right of the
-status line and at the top of the Geo pane. Everything else works with no
-setup and no API keys; reputation lookups use public DNSBLs and the Tor
-exit list, with AbuseIPDB as an optional extra if you configure a key.
+status line and at the top of the Geo pane. Once a coordinate is found,
+the Geo pane also shows a low-resolution world map -- coastlines, country
+borders, and major-city names from Natural Earth's public-domain data,
+bundled in the binary -- zoomed in with a pinpoint at the location and
+whichever nearby big city fits. Everything else works with no setup and
+no API keys; reputation lookups use public DNSBLs and the Tor exit list,
+with AbuseIPDB as an optional extra if you configure a key.
 
 Opening a new host always asks which DNS server to query (blank for the
 system default); the same server is then used for every check on that
