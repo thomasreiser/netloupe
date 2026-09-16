@@ -6,7 +6,7 @@
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::Paragraph;
+use ratatui::widgets::{Cell, Paragraph, Row, Table, TableState};
 use ratatui::Frame;
 
 use crate::app::TabState;
@@ -350,7 +350,14 @@ fn render_alt_names(frame: &mut Frame, area: Rect, tab: &TabState) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let lines: Vec<Line> = alt
+    // A real `Table` rather than manually padding a fixed-width string:
+    // hostnames vary a lot in length (some nested/internal names run
+    // past 30+ characters), and a fixed pad runs the source column
+    // straight into the hostname once it's exceeded rather than leaving
+    // a gap. The source column stays narrow and fixed (its values --
+    // "CT log", "TLS cert", "PTR", "Reverse-IP", possibly combined --
+    // don't need much room); the hostname gets whatever's left.
+    let rows: Vec<Row> = alt
         .names
         .iter()
         .map(|n| {
@@ -360,12 +367,15 @@ fn render_alt_names(frame: &mut Frame, area: Rect, tab: &TabState) {
                 .map(|s| s.label())
                 .collect::<Vec<_>>()
                 .join(", ");
-            Line::from(vec![
-                Span::styled(format!("{:<32}", n.name), Style::default().fg(theme::TEXT)),
-                Span::styled(sources, Style::default().fg(theme::MUTED)),
+            Row::new(vec![
+                Cell::from(n.name.as_str()).style(Style::default().fg(theme::TEXT)),
+                Cell::from(sources).style(Style::default().fg(theme::MUTED)),
             ])
         })
         .collect();
-    let scroll = super::clamp_scroll(tab.scroll, lines.len(), inner.height);
-    frame.render_widget(Paragraph::new(lines).scroll((scroll, 0)), inner);
+    let table = Table::new(rows, [Constraint::Fill(1), Constraint::Length(14)]);
+    let mut state = TableState::default();
+    let max_offset = alt.names.len().saturating_sub(1);
+    *state.offset_mut() = (tab.scroll as usize).min(max_offset);
+    frame.render_stateful_widget(table, inner, &mut state);
 }
