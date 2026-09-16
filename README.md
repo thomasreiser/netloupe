@@ -91,5 +91,6 @@ hop-by-hop trace when a raw socket is available (root, `CAP_NET_RAW`, or
 Linux's unprivileged `ping_group_range`), falling back to a TCP-connect
 TTL sweep otherwise — that can only say how many hops away the target is,
 not which routers are in between, and the pane says so plainly. RPKI
-route-origin validation isn't implemented (the `IP/ASN` pane shows this
-explicitly rather than guessing).
+route-origin validation (via RIPEstat's public validator, which covers
+global RPKI data, not just RIPE's own region) shows in the `IP/ASN`
+pane once an origin AS and prefix are known.

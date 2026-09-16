@@ -389,6 +389,7 @@ fn update_json(update: &CheckUpdate) -> serde_json::Value {
             "asn": i.asn.as_ref().map(|a| json!({
                 "asn": a.asn, "prefix": a.prefix, "country": a.country, "registry": a.registry, "as_name": a.as_name,
             })),
+            "rpki": i.rpki.map(|r| r.label()),
             "rdap": i.rdap.as_ref().map(|r| json!({
                 "handle": r.handle, "name": r.name, "country": r.country, "abuse_email": r.abuse_email,
             })),
