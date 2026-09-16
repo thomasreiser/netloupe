@@ -1,9 +1,11 @@
 //! One module per pane; `render` dispatches to the active one.
 //!
-//! Every pane follows the same shape: a status line (badge + any errors)
-//! followed by whatever the check returned, rendered with `widgets::*`.
-//! Panes never await or touch check state directly — they only read
-//! `TabState`, which `app.rs` already applied incoming events into.
+//! Every pane follows the same shape: a rounded, accent-bordered panel
+//! (the accent identifies the pane at a glance, via `theme::pane_accent`)
+//! containing a status line (badge + check name) and whatever the check
+//! returned, rendered with `widgets::*`. Panes never await or touch check
+//! state directly — they only read `TabState`, which `app.rs` already
+//! applied incoming events into.
 
 mod dns;
 mod geo;
@@ -18,11 +20,12 @@ mod rep;
 mod tls;
 
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Color, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
+use super::theme;
 use crate::app::{CheckStatus, Pane, TabState};
 use crate::checks::CheckId;
 
@@ -46,18 +49,29 @@ pub fn render(frame: &mut Frame, area: Rect, tab: &TabState) {
     }
 }
 
-/// Splits a pane into a one-line status header and the body below it, and
-/// draws the header (status badge, plus any error messages for `checks`).
+/// Wraps the pane in a rounded panel titled with the current pane's name
+/// (in its accent color) and a target subtitle, then splits the inside
+/// into a one-line status header (check badges) and the body below it.
 pub(super) fn header_and_body(
     frame: &mut Frame,
     area: Rect,
     tab: &TabState,
     checks: &[CheckId],
 ) -> Rect {
+    let pane = Pane::ALL
+        .get(tab.active_pane)
+        .copied()
+        .unwrap_or(Pane::Overview);
+    let accent = theme::pane_accent(pane);
+    let subtitle = tab.target.display();
+    let block = theme::panel_with_hint(pane.label(), &subtitle, theme::MUTED, accent);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(1), Constraint::Min(0)])
-        .split(area);
+        .split(inner);
     render_status_header(frame, chunks[0], tab, checks);
     chunks[1]
 }
@@ -66,37 +80,36 @@ fn render_status_header(frame: &mut Frame, area: Rect, tab: &TabState, checks: &
     let mut spans: Vec<Span> = Vec::new();
     for (i, &id) in checks.iter().enumerate() {
         if i > 0 {
-            spans.push(Span::raw("  "));
+            spans.push(Span::raw("   "));
         }
         let slot = tab.slot(id);
         let (glyph, color) = crate::ui::widgets::status_badge::badge(&slot.status);
         spans.push(Span::styled(
-            format!("{glyph} {}", id.label()),
-            Style::default().fg(color),
+            format!("{glyph} "),
+            Style::default().fg(color).add_modifier(Modifier::BOLD),
         ));
+        spans.push(Span::styled(id.label(), Style::default().fg(theme::MUTED)));
     }
     frame.render_widget(Line::from(spans), area);
-
-    // Errors from every relevant check, concatenated below the badges if
-    // there's room; panes with a body layout of their own show these
-    // inline instead via `errors_paragraph`.
-    let _ = area;
 }
 
 /// A dimmed placeholder for a pane whose check hasn't produced data yet
 /// (not started, still running with nothing streamed in, or cancelled).
 pub(super) fn empty_message(message: &str) -> Paragraph<'static> {
-    Paragraph::new(message.to_string()).style(Style::default().fg(Color::DarkGray))
+    Paragraph::new(Line::from(Span::styled(
+        format!("· {message}"),
+        Style::default().fg(theme::MUTED),
+    )))
 }
 
-/// Renders a check's error list, when any, as dimmed red lines.
+/// Renders a check's error list, when any, as red lines with a marker.
 pub(super) fn errors_widget(errors: &[String]) -> Paragraph<'static> {
     let lines: Vec<Line> = errors
         .iter()
         .map(|e| {
             Line::from(Span::styled(
-                format!("! {e}"),
-                Style::default().fg(Color::Red),
+                format!("✗ {e}"),
+                Style::default().fg(theme::RED),
             ))
         })
         .collect();

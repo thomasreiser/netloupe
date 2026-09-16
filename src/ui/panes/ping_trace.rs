@@ -2,7 +2,9 @@
 //! an MTR-style hop list.
 
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::widgets::Block;
+use ratatui::style::{Modifier, Style};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
 use super::{empty_message, header_and_body, is_waiting};
@@ -10,6 +12,7 @@ use crate::app::TabState;
 use crate::checks::ping::PingMethod;
 use crate::checks::CheckId;
 use crate::event::CheckUpdate;
+use crate::ui::theme;
 
 pub fn render(frame: &mut Frame, area: Rect, tab: &TabState) {
     let body = header_and_body(frame, area, tab, &[CheckId::Ping, CheckId::Trace]);
@@ -25,6 +28,11 @@ pub fn render(frame: &mut Frame, area: Rect, tab: &TabState) {
     render_ping_summary(frame, chunks[0], tab);
     render_sparkline(frame, chunks[1], tab);
     render_trace(frame, chunks[2], tab);
+}
+
+fn rtt_color(d: Option<std::time::Duration>) -> ratatui::style::Color {
+    d.map(|d| theme::gradient(((d.as_millis() as f64 - 15.0) / 185.0).clamp(0.0, 1.0)))
+        .unwrap_or(theme::MUTED)
 }
 
 fn render_ping_summary(frame: &mut Frame, area: Rect, tab: &TabState) {
@@ -54,27 +62,48 @@ fn render_ping_summary(frame: &mut Frame, area: Rect, tab: &TabState) {
     } else {
         0
     };
+    let loss_color = theme::gradient(loss as f64 / 100.0);
 
-    let mut rows = vec![
-        ("Method".to_string(), method),
-        (
-            "Sent/received".to_string(),
-            format!("{}/{} ({loss}% loss)", ping.sent, ping.received),
-        ),
-        (
-            "min/avg/max".to_string(),
-            format!(
-                "{} / {} / {}",
-                fmt_ms(ping.min),
-                fmt_ms(ping.avg),
-                fmt_ms(ping.max)
+    let label = |s: &'static str| {
+        Span::styled(
+            format!("{s:<15}"),
+            Style::default()
+                .fg(theme::LABEL)
+                .add_modifier(Modifier::BOLD),
+        )
+    };
+
+    let lines = vec![
+        Line::from(vec![
+            label("Method"),
+            Span::styled(method, Style::default().fg(theme::TEXT)),
+        ]),
+        Line::from(vec![
+            label("Sent/received"),
+            Span::styled(
+                format!("{}/{} ", ping.sent, ping.received),
+                Style::default().fg(theme::TEXT),
             ),
-        ),
+            Span::styled(
+                format!("({loss}% loss)"),
+                Style::default().fg(loss_color).add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        Line::from(vec![
+            label("min/avg/max"),
+            Span::styled(fmt_ms(ping.min), Style::default().fg(rtt_color(ping.min))),
+            Span::styled(" / ", Style::default().fg(theme::FAINT)),
+            Span::styled(
+                fmt_ms(ping.avg),
+                Style::default()
+                    .fg(rtt_color(ping.avg))
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" / ", Style::default().fg(theme::FAINT)),
+            Span::styled(fmt_ms(ping.max), Style::default().fg(rtt_color(ping.max))),
+        ]),
     ];
-    if let Some(reason) = &ping.fallback_reason {
-        rows.push(("Note".to_string(), reason.clone()));
-    }
-    frame.render_widget(crate::ui::widgets::kv_table::widget(&rows), area);
+    frame.render_widget(Paragraph::new(lines), area);
 }
 
 fn render_sparkline(frame: &mut Frame, area: Rect, tab: &TabState) {
@@ -85,7 +114,7 @@ fn render_sparkline(frame: &mut Frame, area: Rect, tab: &TabState) {
     if ping.samples.is_empty() {
         return;
     }
-    let block = Block::bordered().title(" RTT (ms) ");
+    let block = theme::panel("RTT", theme::pane_accent(crate::app::Pane::PingTrace));
     let inner = block.inner(area);
     frame.render_widget(block, area);
     frame.render_widget(crate::ui::widgets::sparkline::widget(&ping.samples), inner);
