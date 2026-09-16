@@ -191,6 +191,7 @@ async fn run_headless(
             shared: shared.clone(),
             providers: providers.clone(),
             resolver,
+            ping_paused: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
         let tx = tx.clone();
         tokio::spawn(async move { check.run(ctx, tx).await });

@@ -188,6 +188,12 @@ pub struct CheckContext {
     /// `checks::dns::DnsOpts`, so switching a tab's resolver changes
     /// where *every* lookup for that host goes, not just the DNS pane's.
     pub resolver: Option<std::net::IpAddr>,
+    /// Only meaningful to `checks::ping`: when set, it idles in place
+    /// instead of sending probes, preserving its accumulated sample
+    /// history for when this is cleared again (`Action::TogglePingPause`,
+    /// see `app.rs`). Always freshly `false` for a headless run, which
+    /// has no interactive input to toggle it with.
+    pub ping_paused: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// One check implementation. Kept as a trait (rather than a bare async fn)

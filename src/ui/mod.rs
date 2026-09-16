@@ -492,6 +492,7 @@ fn render_help(frame: &mut Frame, area: Rect) {
         row("e", "Toggle evidence details (Hosting pane)"),
         row("a", "Open the alternative-hostname picker (Overview)"),
         row("w", "Walk an NSEC-signed zone for its full name list (DNS)"),
+        row("space", "Pause/resume the continuous ping (Ping/Trace)"),
         row("y", "Copy the current pane as text"),
         row("s", "Open the settings editor"),
         row("?", "Help overlay"),
@@ -534,6 +535,7 @@ mod tests {
             zone_walk_confirmed: None,
             scroll: 0,
             resolver: None,
+            ping_paused: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
@@ -580,6 +582,7 @@ mod tests {
             max: Some(Duration::from_millis(180)),
             avg: Some(Duration::from_millis(96)),
             fallback_reason: None,
+            paused: false,
         };
         tab.checks.insert(
             CheckId::Ping,

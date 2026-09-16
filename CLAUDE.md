@@ -311,6 +311,7 @@ Config lives at `$XDG_CONFIG_HOME/netloupe/config.toml`. Every option has a sens
 | `e` | Toggle evidence details (Hosting pane) |
 | `a` | Open the alternative-hostname picker (Overview) |
 | `w` | Walk an NSEC-signed zone for its full name list (DNS) |
+| `Space` | Pause/resume the continuous ICMP/TCP ping (Ping/Trace) |
 | `s` | Open the settings editor |
 | `y` | Copy the current pane as text |
 | `?` | Help overlay |
