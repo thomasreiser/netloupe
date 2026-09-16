@@ -169,17 +169,17 @@ async fn run_headless(
     let shared = SharedResultsHandle::new();
     let (tx, mut rx) = mpsc::channel::<CheckEvent>(256);
 
-    // Trace isn't implemented and Ports is opt-in (never runs headlessly
-    // without an explicit --yes-i-am-authorized flag, which doesn't exist
-    // yet); Hosting is handled separately below since it never "finishes".
+    // Ports is opt-in (never runs headlessly without an explicit
+    // --yes-i-am-authorized flag, which doesn't exist yet); Hosting is
+    // handled separately below since it never "finishes".
     let mut pending: BTreeSet<CheckId> = checks::registry()
         .iter()
         .map(|c| c.id())
-        .filter(|id| !id.requires_opt_in() && *id != CheckId::Trace && *id != CheckId::Hosting)
+        .filter(|id| !id.requires_opt_in() && *id != CheckId::Hosting)
         .collect();
 
     for check in checks::registry() {
-        if check.id().requires_opt_in() || check.id() == CheckId::Trace {
+        if check.id().requires_opt_in() {
             continue;
         }
         let ctx = CheckContext {
@@ -470,16 +470,25 @@ fn update_json(update: &CheckUpdate) -> serde_json::Value {
             "complete": z.complete,
             "errors": z.errors,
         }),
-        CheckUpdate::Trace(_) | CheckUpdate::NotImplemented => json!(null),
+        CheckUpdate::Trace(t) => json!({
+            "target_ip": t.target_ip.to_string(),
+            "method": format!("{:?}", t.method),
+            "reached": t.reached,
+            "fallback_reason": t.fallback_reason,
+            "hops": t.hops.iter().map(|h| json!({
+                "ttl": h.ttl,
+                "addr": h.addr.map(|a| a.to_string()),
+                "rtt_ms": h.rtt.map(|d| d.as_millis() as u64),
+                "provider": h.provider,
+            })).collect::<Vec<_>>(),
+        }),
+        CheckUpdate::NotImplemented => json!(null),
     }
 }
 
 fn print_summary(target: &Target, slots: &BTreeMap<CheckId, CheckSlot>) {
     println!("netloupe check: {}", target.display());
     for id in CheckId::ALL {
-        if id == CheckId::Trace {
-            continue;
-        }
         let Some(slot) = slots.get(&id) else { continue };
         let status = match &slot.status {
             CheckStatus::Done => "done",

@@ -91,6 +91,9 @@ rand = "0.10"
 
 [dev-dependencies]
 tempfile = "3"
+# `start_paused`/`tokio::time::pause` for deterministic timeout tests
+# (checks::trace) that shouldn't depend on real network timing.
+tokio = { version = "1", features = ["test-util"] }
 
 [profile.release]
 lto = true

@@ -672,6 +672,43 @@ mod tests {
             },
         );
 
+        let target_ip: std::net::IpAddr = "93.184.216.34".parse().unwrap();
+        let trace = crate::checks::trace::TraceUpdate {
+            target_ip,
+            method: crate::checks::trace::TraceMethod::TcpConnect { port: 443 },
+            hops: vec![
+                crate::checks::trace::TraceHop {
+                    ttl: 1,
+                    addr: Some("10.0.0.1".parse().unwrap()),
+                    rtt: Some(Duration::from_millis(2)),
+                    provider: None,
+                },
+                crate::checks::trace::TraceHop {
+                    ttl: 2,
+                    addr: None,
+                    rtt: None,
+                    provider: None,
+                },
+                crate::checks::trace::TraceHop {
+                    ttl: 3,
+                    addr: Some(target_ip),
+                    rtt: Some(Duration::from_millis(28)),
+                    provider: Some("Example CDN".into()),
+                },
+            ],
+            reached: true,
+            fallback_reason: Some(
+                "no ICMP socket available; running a simple TCP-connect TTL sweep instead".into(),
+            ),
+        };
+        tab.checks.insert(
+            CheckId::Trace,
+            CheckSlot {
+                status: CheckStatus::Done,
+                update: Some(CheckUpdate::Trace(trace)),
+            },
+        );
+
         tab
     }
 
