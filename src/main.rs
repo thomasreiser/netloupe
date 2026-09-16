@@ -380,6 +380,15 @@ fn update_json(update: &CheckUpdate) -> serde_json::Value {
             "redirect_count": h.redirect_chain.len(),
             "http_version": h.http_version,
             "timing_ms": h.timing.map(|d| d.as_millis() as u64),
+            "plain_http": h.plain_http.as_ref().map(|p| json!({
+                "port": p.port,
+                "reachable": p.reachable,
+                "status": p.status,
+                "redirects_to_https": p.redirects_to_https,
+                "error": p.error,
+                "h2c_supported": p.h2c_supported,
+            })),
+            "http3_supported": h.http3_supported,
             "errors": h.errors,
         }),
         CheckUpdate::Geo(g) => json!({

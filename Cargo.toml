@@ -45,8 +45,13 @@ rustls-pki-types = "1"
 webpki-roots = "1"
 x509-parser = "0.18"
 
-# HTTP
-reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "query"] }
+# HTTP. `http2` lets reqwest actually negotiate HTTP/2 via ALPN over TLS
+# (without it, every response reports HTTP/1.1 regardless of what the
+# server offers). `http3` (QUIC, via the pure-Rust quinn/h3 stack -- no
+# OpenSSL) is still marked unstable upstream and needs the `reqwest_unstable`
+# cfg flag to even compile; see `.cargo/config.toml`, which sets it project-
+# wide. Both feed the HTTP pane's max-version check.
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "query", "http2", "http3"] }
 
 # Range-list formats
 csv = "1"

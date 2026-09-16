@@ -1,0 +1,7 @@
+# Required for reqwest's `http3` feature (HTTP/3-over-QUIC support, still
+# marked unstable upstream) to compile at all -- see the `reqwest`
+# dependency comment in Cargo.toml. Applies project-wide since reqwest
+# gates the relevant API behind this cfg flag rather than the Cargo
+# feature alone.
+[build]
+rustflags = ["--cfg", "reqwest_unstable"]

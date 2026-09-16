@@ -46,6 +46,30 @@ pub struct RedirectHop {
     pub location: Option<String>,
 }
 
+/// A dedicated, always-attempted plain-`http://` request to port 80 (or
+/// `ctx.port` when the target specifies one), independent of whatever the
+/// main HTTPS-first flow above does -- so "does this host speak HTTP at
+/// all on the standard port" is answered even when HTTPS also works
+/// (unlike `fell_back_to_http`, which only fires when HTTPS fails
+/// outright).
+#[derive(Debug, Clone)]
+pub struct PlainHttpProbe {
+    pub port: u16,
+    pub reachable: bool,
+    pub status: Option<u16>,
+    /// The response's `Location` header pointed at an `https://` URL --
+    /// the common "upgrade to TLS" redirect pattern.
+    pub redirects_to_https: bool,
+    pub error: Option<String>,
+    /// Whether the server accepted an HTTP/2-over-cleartext ("h2c")
+    /// connection via prior knowledge (the client just speaks the HTTP/2
+    /// wire format directly, no TLS/ALPN and no Upgrade-header
+    /// negotiation involved) -- a separate connection attempt from the
+    /// plain-HTTP/1.1 request above, so this can be `true` even when
+    /// `reachable` is `false` for HTTP/1.1's own request, or vice versa.
+    pub h2c_supported: bool,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct HttpResult {
     pub requested_url: String,
@@ -60,6 +84,11 @@ pub struct HttpResult {
     /// Set when an `https://` attempt failed outright and an unencrypted
     /// `http://` retry was made instead.
     pub fell_back_to_http: bool,
+    pub plain_http: Option<PlainHttpProbe>,
+    /// Whether an HTTP/3-only request (QUIC over UDP, TLS 1.3, no
+    /// fallback) to the same host/port succeeded -- a separate connection
+    /// attempt from the main flow above, which never tries HTTP/3 itself.
+    pub http3_supported: bool,
     pub errors: Vec<String>,
 }
 
@@ -79,25 +108,138 @@ pub(crate) async fn run(ctx: CheckContext, tx: mpsc::Sender<CheckEvent>) {
             ..Default::default()
         };
 
-        if let Err(https_err) = run_into(&https_url, timeout, &mut result).await {
-            // HTTPS didn't even connect (refused, TLS failure, ...); retry
-            // once over plain HTTP so the pane still shows something for a
-            // site that simply doesn't speak TLS.
-            let http_url = url_for(&host, port, false);
-            result
-                .errors
-                .push(format!("HTTPS failed ({https_err}); retrying over HTTP"));
-            result.fell_back_to_http = true;
-            result.requested_url = http_url.clone();
-            if let Err(err) = run_into(&http_url, timeout, &mut result).await {
-                result.errors.push(err);
+        // The plain-HTTP-on-port-80 and HTTP/3 probes are independent of
+        // whichever scheme the main flow below lands on (including the
+        // fallback just below it), so they run concurrently rather than
+        // being folded into that logic.
+        let plain_http_probe = probe_plain_http(&host, port.unwrap_or(80), timeout);
+        let http3_probe = probe_http3(&https_url, timeout);
+
+        let main_flow = async {
+            if let Err(https_err) = run_into(&https_url, timeout, &mut result).await {
+                // HTTPS didn't even connect (refused, TLS failure, ...); retry
+                // once over plain HTTP so the pane still shows something for a
+                // site that simply doesn't speak TLS.
+                let http_url = url_for(&host, port, false);
+                result
+                    .errors
+                    .push(format!("HTTPS failed ({https_err}); retrying over HTTP"));
+                result.fell_back_to_http = true;
+                result.requested_url = http_url.clone();
+                if let Err(err) = run_into(&http_url, timeout, &mut result).await {
+                    result.errors.push(err);
+                }
             }
-        }
+        };
+
+        let (_, plain_http, http3_supported) =
+            tokio::join!(main_flow, plain_http_probe, http3_probe);
+        result.plain_http = Some(plain_http);
+        result.http3_supported = http3_supported;
 
         ctx.shared.set_http(result.clone()).await;
         Ok(CheckUpdate::Http(result))
     })
     .await;
+}
+
+/// Always attempts a plain (unencrypted) `http://` request to `port`,
+/// regardless of whether HTTPS works -- answering "does this host speak
+/// HTTP on the standard port at all" as its own question, distinct from
+/// `fell_back_to_http` (which only fires when HTTPS fails outright).
+async fn probe_plain_http(host: &str, port: u16, timeout: Duration) -> PlainHttpProbe {
+    let url = format!("http://{host}:{port}/");
+    let h2c_supported = probe_h2c(&url, timeout).await;
+
+    let client = match build_client(timeout) {
+        Ok(client) => client,
+        Err(err) => {
+            return PlainHttpProbe {
+                port,
+                reachable: false,
+                status: None,
+                redirects_to_https: false,
+                error: Some(err),
+                h2c_supported,
+            }
+        }
+    };
+
+    match client.get(&url).send().await {
+        Ok(response) => {
+            let status = response.status().as_u16();
+            let redirects_to_https = response
+                .headers()
+                .get(reqwest::header::LOCATION)
+                .and_then(|v| v.to_str().ok())
+                .is_some_and(|loc| loc.starts_with("https://"));
+            PlainHttpProbe {
+                port,
+                reachable: true,
+                status: Some(status),
+                redirects_to_https,
+                error: None,
+                h2c_supported,
+            }
+        }
+        Err(err) => PlainHttpProbe {
+            port,
+            reachable: false,
+            status: None,
+            redirects_to_https: false,
+            error: Some(err.to_string()),
+            h2c_supported,
+        },
+    }
+}
+
+/// Attempts an HTTP/2-over-cleartext connection via "prior knowledge"
+/// (the client speaks the HTTP/2 wire format directly, no TLS/ALPN and no
+/// Upgrade-header negotiation) -- a separate connection from the plain
+/// HTTP/1.1 request `probe_plain_http` also makes, since a server that
+/// doesn't understand h2c will usually just fail the connection outright
+/// rather than gracefully falling back.
+async fn probe_h2c(url: &str, timeout: Duration) -> bool {
+    let Ok(client) = reqwest::Client::builder()
+        .timeout(timeout)
+        .redirect(reqwest::redirect::Policy::none())
+        .user_agent(concat!("netloupe/", env!("CARGO_PKG_VERSION")))
+        .http2_prior_knowledge()
+        .build()
+    else {
+        return false;
+    };
+    matches!(
+        client.get(url).send().await,
+        Ok(response) if response.version() == reqwest::Version::HTTP_2
+    )
+}
+
+/// Attempts an HTTP/3-only request (QUIC over UDP, TLS 1.3 via QUIC's own
+/// handshake) to `url` -- a separate connection from the main HTTPS flow,
+/// which never negotiates HTTP/3 itself. There's no fallback within a
+/// single request here: if the server doesn't answer on QUIC, this simply
+/// fails, which is exactly the "no" this probe is asking for.
+async fn probe_http3(url: &str, timeout: Duration) -> bool {
+    let Ok(client) = reqwest::Client::builder()
+        .timeout(timeout)
+        .redirect(reqwest::redirect::Policy::none())
+        .user_agent(concat!("netloupe/", env!("CARGO_PKG_VERSION")))
+        .http3_prior_knowledge()
+        .build()
+    else {
+        return false;
+    };
+    // `http3_prior_knowledge()` alone only prepares the client's QUIC
+    // connector; a request still needs `.version(HTTP_3)` set explicitly
+    // to actually dispatch through it; the client's HTTP/2 counterpart
+    // doesn't have this quirk since it also negotiates HTTP/2 normally
+    // over any HTTPS request.
+    let request = client.get(url).version(reqwest::Version::HTTP_3);
+    matches!(
+        request.send().await,
+        Ok(response) if response.version() == reqwest::Version::HTTP_3
+    )
 }
 
 async fn run_into(
