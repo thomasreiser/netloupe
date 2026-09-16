@@ -47,6 +47,20 @@ pub(crate) async fn run(ctx: CheckContext, tx: mpsc::Sender<CheckEvent>) {
             ..Default::default()
         };
 
+        // DNSBLs, the Tor exit list, and AbuseIPDB all track abuse *on the
+        // public Internet*; a private/loopback/link-local/etc. address was
+        // never eligible to be listed anywhere, so querying them would
+        // only ever say "clean" — a fact about the list, not about this
+        // address. Skip the network calls and say why instead.
+        let class = crate::checks::ipinfo::classify(ip);
+        if !class.is_global() {
+            result.errors.push(format!(
+                "{ip} is a {} address — public reputation lists don't apply to it",
+                class.label()
+            ));
+            return Ok(CheckUpdate::Reputation(result));
+        }
+
         let IpAddr::V4(v4) = ip else {
             result
                 .errors
@@ -152,10 +166,56 @@ async fn query_abuseipdb(ip: Ipv4Addr, key: &str, timeout: Duration) -> Result<u
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use tokio::sync::mpsc;
+    use tokio_util::sync::CancellationToken;
+
     use super::*;
+    use crate::checks::{CheckContext, SharedResultsHandle};
+    use crate::config::Config;
+    use crate::event::CheckPayload;
+    use crate::providers::ProviderDb;
+    use crate::target::Target;
 
     #[test]
     fn reverses_octets_for_dnsbl_query() {
         assert_eq!(reversed_octets("192.0.2.1".parse().unwrap()), "1.2.0.192");
+    }
+
+    /// A private-address target has never been eligible for listing on a
+    /// public DNSBL/Tor-exit list, so the check must skip those queries
+    /// entirely and say why, rather than reporting a meaningless "clean".
+    #[tokio::test]
+    async fn skips_reputation_lookups_for_a_private_address() {
+        let ctx = CheckContext {
+            tab_id: 0,
+            target: Target::Ip("10.0.0.5".parse().unwrap()),
+            port: None,
+            config: Arc::new(Config::default()),
+            cancel: CancellationToken::new(),
+            shared: SharedResultsHandle::new(),
+            providers: Arc::new(ProviderDb::default()),
+        };
+        let (tx, mut rx) = mpsc::channel(8);
+        run(ctx, tx).await;
+
+        let mut done = None;
+        while let Some(event) = rx.recv().await {
+            if let CheckPayload::Done(CheckUpdate::Reputation(rep)) = event.payload {
+                done = Some(rep);
+                break;
+            }
+        }
+        let rep = done.expect("reputation check must report Done even when it skips the lookup");
+
+        assert!(rep.dnsbl.is_empty());
+        assert!(rep.tor_exit_node.is_none());
+        assert_eq!(rep.errors.len(), 1);
+        assert!(
+            rep.errors[0].contains("private"),
+            "expected the error to name the address class: {:?}",
+            rep.errors[0]
+        );
     }
 }

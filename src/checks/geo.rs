@@ -36,6 +36,20 @@ pub(crate) async fn run(ctx: CheckContext, tx: mpsc::Sender<CheckEvent>) {
             ..Default::default()
         };
 
+        // A private/loopback/link-local/etc. address was never assigned to
+        // a real-world location by a registry, so a GeoLite2 lookup would
+        // either miss (reported as a plain "not found", which reads like a
+        // data gap) or — worse — land on whatever default entry the
+        // database happens to have for reserved space. Skip it and say why.
+        let class = crate::checks::ipinfo::classify(ip);
+        if !class.is_global() {
+            result.errors.push(format!(
+                "{ip} is a {} address — it has no real-world geolocation",
+                class.label()
+            ));
+            return Ok(CheckUpdate::Geo(result));
+        }
+
         let city_db = ctx.config.geoip.city_db.clone();
         let asn_db = ctx.config.geoip.asn_db.clone();
 
@@ -127,4 +141,54 @@ async fn lookup_asn_org(path: PathBuf, ip: IpAddr) -> Result<Option<String>, Str
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use tokio::sync::mpsc;
+    use tokio_util::sync::CancellationToken;
+
+    use super::*;
+    use crate::checks::{CheckContext, SharedResultsHandle};
+    use crate::config::Config;
+    use crate::event::CheckPayload;
+    use crate::providers::ProviderDb;
+    use crate::target::Target;
+
+    /// A private-address target must skip the GeoLite2 lookups entirely
+    /// (there's nothing meaningful to look up) and say why, rather than
+    /// reporting a bare "not found" that reads like a data gap.
+    #[tokio::test]
+    async fn skips_the_lookup_for_a_private_address() {
+        let ctx = CheckContext {
+            tab_id: 0,
+            target: Target::Ip("192.168.1.1".parse().unwrap()),
+            port: None,
+            config: Arc::new(Config::default()),
+            cancel: CancellationToken::new(),
+            shared: SharedResultsHandle::new(),
+            providers: Arc::new(ProviderDb::default()),
+        };
+        let (tx, mut rx) = mpsc::channel(8);
+        run(ctx, tx).await;
+
+        let mut done = None;
+        while let Some(event) = rx.recv().await {
+            if let CheckPayload::Done(CheckUpdate::Geo(geo)) = event.payload {
+                done = Some(geo);
+                break;
+            }
+        }
+        let geo = done.expect("geo check must report Done even when it skips the lookup");
+
+        assert!(geo.country.is_none());
+        assert_eq!(geo.errors.len(), 1);
+        assert!(
+            geo.errors[0].contains("private"),
+            "expected the error to name the address class: {:?}",
+            geo.errors[0]
+        );
+    }
 }

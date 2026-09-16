@@ -1,9 +1,9 @@
 //! Rep pane: DNSBLs, Tor exit list, optional API providers.
 
-use ratatui::layout::Rect;
+use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::Frame;
 
-use super::{empty_message, header_and_body, is_waiting};
+use super::{empty_message, errors_widget, header_and_body, is_waiting};
 use crate::app::TabState;
 use crate::checks::CheckId;
 use crate::event::CheckUpdate;
@@ -47,5 +47,20 @@ pub fn render(frame: &mut Frame, area: Rect, tab: &TabState) {
         rows.push(("AbuseIPDB score".to_string(), format!("{score}/100")));
     }
 
-    frame.render_widget(crate::ui::widgets::kv_table::widget(&rows), body);
+    if rows.is_empty() {
+        frame.render_widget(errors_widget(&rep.errors), body);
+        return;
+    }
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Min(0),
+            Constraint::Length(rep.errors.len().min(4) as u16),
+        ])
+        .split(body);
+    frame.render_widget(crate::ui::widgets::kv_table::widget(&rows), chunks[0]);
+    if !rep.errors.is_empty() {
+        frame.render_widget(errors_widget(&rep.errors), chunks[1]);
+    }
 }

@@ -23,10 +23,17 @@ pub fn render(frame: &mut Frame, area: Rect, tab: &TabState) {
         return;
     };
     if detections.is_empty() {
-        frame.render_widget(
-            empty_message("no known provider detected (edge hidden origin is expected here)"),
-            body,
-        );
+        let message = match &tab.slot(CheckId::IpInfo).update {
+            Some(CheckUpdate::IpInfo(info)) if !info.class.is_global() => {
+                format!(
+                    "{} is a {} address — no public hosting provider applies to it",
+                    info.ip,
+                    info.class.label()
+                )
+            }
+            _ => "no known provider detected (edge hidden origin is expected here)".to_string(),
+        };
+        frame.render_widget(empty_message(&message), body);
         return;
     }
 
