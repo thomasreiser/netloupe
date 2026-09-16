@@ -383,6 +383,14 @@ fn update_json(update: &CheckUpdate) -> serde_json::Value {
         CheckUpdate::Ports(p) => json!({
             "scanned": p.scanned.iter().map(|s| json!({"port": s.port, "open": s.open})).collect::<Vec<_>>(),
         }),
+        CheckUpdate::AltNames(a) => json!({
+            "ips": a.ips.iter().map(ToString::to_string).collect::<Vec<_>>(),
+            "names": a.names.iter().map(|n| json!({
+                "name": n.name,
+                "sources": n.sources.iter().map(|s| s.label()).collect::<Vec<_>>(),
+            })).collect::<Vec<_>>(),
+            "errors": a.errors,
+        }),
         CheckUpdate::Trace(_) | CheckUpdate::NotImplemented => json!(null),
     }
 }
