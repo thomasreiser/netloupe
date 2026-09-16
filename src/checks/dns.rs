@@ -395,6 +395,22 @@ pub async fn lookup_txt(name: &str, timeout: Duration) -> Result<Vec<String>, St
     }
 }
 
+/// Looks up a CNAME record for an arbitrary name, for checks (ACME
+/// challenge evidence) that need a one-off CNAME query outside the main
+/// `DnsResult`. `hickory-resolver` has no `cname_lookup` shorthand, so this
+/// goes through the generic `lookup`.
+pub async fn lookup_cname(name: &str, timeout: Duration) -> Result<Option<String>, String> {
+    let resolver = system_resolver(timeout)?;
+    match resolver.lookup(name, RecordType::CNAME).await {
+        Ok(lookup) => Ok(lookup.answers().iter().find_map(|r| match &r.data {
+            RData::CNAME(cname) => Some(cname.0.to_string()),
+            _ => None,
+        })),
+        Err(err) if err.to_string().to_lowercase().contains("no record") => Ok(None),
+        Err(err) => Err(err.to_string()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

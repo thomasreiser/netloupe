@@ -274,6 +274,32 @@ fn check_json(status: &CheckStatus, update: Option<&CheckUpdate>) -> serde_json:
     json!({ "status": status_str, "error": error, "data": data })
 }
 
+fn acme_json(acme: &netloupe::checks::acme::AcmeInfo) -> serde_json::Value {
+    use netloupe::checks::acme::ChallengeHint;
+    use serde_json::json;
+
+    let hint = match acme.challenge_hint {
+        ChallengeHint::Dns01Certain => "dns01_certain",
+        ChallengeHint::EitherMethodPossible => "either_method_possible",
+        ChallengeHint::NotPublicAcme => "not_public_acme",
+    };
+    json!({
+        "authority": acme.authority.name(),
+        "is_wildcard": acme.is_wildcard,
+        "challenge_hint": hint,
+        "note": acme.note,
+        "dns01": acme.dns01.as_ref().map(|d| json!({
+            "txt_values": d.txt_values,
+            "cname_target": d.cname_target,
+        })),
+        "http01": acme.http01.as_ref().map(|h| json!({
+            "status": h.status,
+            "body_sample": h.body_sample,
+            "error": h.error,
+        })),
+    })
+}
+
 fn update_json(update: &CheckUpdate) -> serde_json::Value {
     use serde_json::json;
 
@@ -336,6 +362,7 @@ fn update_json(update: &CheckUpdate) -> serde_json::Value {
             "protocol_version": t.protocol_version, "cipher_suite": t.cipher_suite,
             "issuer": t.issuer, "subject": t.subject, "sans": t.sans,
             "days_until_expiry": t.days_until_expiry,
+            "acme": t.acme.as_ref().map(acme_json),
             "errors": t.errors,
         }),
         CheckUpdate::Http(h) => json!({

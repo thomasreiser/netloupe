@@ -238,6 +238,7 @@ mod tests {
 
     use super::*;
     use crate::app::{CheckSlot, CheckStatus, Mode, Pane, TabState};
+    use crate::checks::acme::{AcmeInfo, CertificateAuthority, ChallengeHint, Dns01Evidence};
     use crate::checks::ping::{PingMethod, PingSample, PingUpdate};
     use crate::checks::{CheckId, SharedResultsHandle};
     use crate::config::Config;
@@ -336,6 +337,38 @@ mod tests {
                 update: None,
             },
         );
+
+        let tls = crate::checks::tls::TlsResult {
+            host: "example.com".into(),
+            port: 443,
+            protocol_version: Some("TLSv1_3".into()),
+            cipher_suite: Some("TLS13_AES_128_GCM_SHA256".into()),
+            issuer: Some("C=US, O=Let's Encrypt, CN=R3".into()),
+            subject: Some("CN=example.com".into()),
+            sans: vec!["*.example.com".into(), "example.com".into()],
+            days_until_expiry: Some(42),
+            chain_len: 2,
+            acme: Some(AcmeInfo {
+                authority: CertificateAuthority::LetsEncrypt,
+                is_wildcard: true,
+                challenge_hint: ChallengeHint::Dns01Certain,
+                dns01: Some(Dns01Evidence {
+                    txt_values: vec!["abc123".into()],
+                    cname_target: None,
+                }),
+                http01: None,
+                note: None,
+            }),
+            ..Default::default()
+        };
+        tab.checks.insert(
+            CheckId::Tls,
+            CheckSlot {
+                status: CheckStatus::Done,
+                update: Some(CheckUpdate::Tls(tls)),
+            },
+        );
+
         tab
     }
 
