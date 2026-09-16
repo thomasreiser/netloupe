@@ -1,0 +1,44 @@
+id = "cloudflare"
+name = "Cloudflare"
+kind = ["cdn", "dns", "waf"]
+
+[ranges]
+sources = [
+  { url = "https://www.cloudflare.com/ips-v4", format = "plain" },
+  { url = "https://www.cloudflare.com/ips-v6", format = "plain" },
+]
+default_layer = "edge"
+
+[asn]
+numbers = [13335]
+
+[[signal]]
+layer = "edge"
+type = "header"
+name = "cf-ray"
+weight = 60
+
+[[signal]]
+layer = "edge"
+type = "header"
+name = "server"
+value_regex = "(?i)^cloudflare$"
+weight = 50
+
+[[signal]]
+layer = "dns"
+type = "ns"
+pattern = "*.ns.cloudflare.com"
+weight = 90
+
+[[signal]]
+layer = "edge"
+type = "cname"
+pattern = "*.cdn.cloudflare.net"
+weight = 70
+
+[[signal]]
+layer = "edge"
+type = "tls_issuer"
+pattern = "Cloudflare*"
+weight = 40

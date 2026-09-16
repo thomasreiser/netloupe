@@ -1,0 +1,24 @@
+id = "fastly"
+name = "Fastly"
+kind = ["cdn"]
+
+[ranges]
+sources = [
+  { url = "https://api.fastly.com/public-ip-list", format = "fastly-json" },
+]
+default_layer = "edge"
+
+[asn]
+numbers = [54113]
+
+[[signal]]
+layer = "edge"
+type = "header"
+name = "x-served-by"
+weight = 50
+
+[[signal]]
+layer = "edge"
+type = "header"
+name = "x-fastly-request-id"
+weight = 60

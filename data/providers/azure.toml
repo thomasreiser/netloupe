@@ -1,0 +1,46 @@
+id = "azure"
+name = "Microsoft Azure"
+kind = ["cloud", "cdn"]
+
+[ranges]
+sources = [
+  { url = "https://www.microsoft.com/en-us/download/details.aspx?id=56519", format = "azure-service-tags" },
+]
+default_layer = "origin"
+
+[ranges.service_layers]
+"AzureFrontDoor.Frontend" = "edge"
+"AzureCloudCDN" = "edge"
+
+[asn]
+numbers = [8075]
+
+[[signal]]
+layer = "origin"
+type = "cname"
+pattern = "*.azurewebsites.net"
+weight = 70
+
+[[signal]]
+layer = "edge"
+type = "cname"
+pattern = "*.azureedge.net"
+weight = 70
+
+[[signal]]
+layer = "edge"
+type = "header"
+name = "x-azure-ref"
+weight = 60
+
+[[signal]]
+layer = "dns"
+type = "ns"
+pattern = "*.azure-dns.*"
+weight = 90
+
+[[signal]]
+layer = "origin"
+type = "tls_san"
+pattern = "*.azurewebsites.net"
+weight = 50

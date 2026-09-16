@@ -1,0 +1,25 @@
+id = "gcp"
+name = "Google Cloud"
+kind = ["cloud"]
+
+[ranges]
+sources = [
+  { url = "https://www.gstatic.com/ipranges/cloud.json", format = "gcp-json" },
+]
+default_layer = "origin"
+
+[asn]
+numbers = [15169, 396982]
+
+[[signal]]
+layer = "edge"
+type = "header"
+name = "via"
+value_regex = "(?i)google"
+weight = 40
+
+[[signal]]
+layer = "origin"
+type = "ptr"
+pattern = "*.bc.googleusercontent.com"
+weight = 60

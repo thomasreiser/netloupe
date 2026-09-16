@@ -1,0 +1,17 @@
+id = "microsoft365"
+name = "Microsoft 365"
+kind = ["mail"]
+
+# Purely a mail-signal provider: Microsoft 365 shares Azure's ASN and IP
+# space, so it's identified by MX/SPF, not by range or ASN matching.
+[[signal]]
+layer = "mail"
+type = "mx"
+pattern = "*.mail.protection.outlook.com"
+weight = 80
+
+[[signal]]
+layer = "mail"
+type = "spf_include"
+pattern = "spf.protection.outlook.com"
+weight = 70

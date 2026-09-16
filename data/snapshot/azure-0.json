@@ -1,0 +1,58 @@
+{
+  "changeNumber": 0,
+  "cloud": "Public",
+  "values": [
+    {
+      "name": "AzureCloud.westeurope",
+      "id": "AzureCloud.westeurope",
+      "properties": {
+        "changeNumber": 1,
+        "region": "westeurope",
+        "regionId": 22,
+        "platform": "Azure",
+        "systemService": "",
+        "addressPrefixes": ["20.50.0.0/17", "2603:1020:401::/48"],
+        "networkFeatures": ["API", "NSG", "UDR"]
+      }
+    },
+    {
+      "name": "AzureCloud.eastus",
+      "id": "AzureCloud.eastus",
+      "properties": {
+        "changeNumber": 1,
+        "region": "eastus",
+        "regionId": 5,
+        "platform": "Azure",
+        "systemService": "",
+        "addressPrefixes": ["20.42.0.0/16", "2603:1030:a03::/48"],
+        "networkFeatures": ["API", "NSG", "UDR"]
+      }
+    },
+    {
+      "name": "AzureFrontDoor.Frontend",
+      "id": "AzureFrontDoor.Frontend",
+      "properties": {
+        "changeNumber": 1,
+        "region": "",
+        "regionId": 0,
+        "platform": "Azure",
+        "systemService": "AzureFrontDoor.Frontend",
+        "addressPrefixes": ["13.107.213.0/24", "13.107.246.0/24", "2a01:111:2050::/44"],
+        "networkFeatures": []
+      }
+    },
+    {
+      "name": "AppService.westeurope",
+      "id": "AppService.westeurope",
+      "properties": {
+        "changeNumber": 1,
+        "region": "westeurope",
+        "regionId": 22,
+        "platform": "Azure",
+        "systemService": "AppService",
+        "addressPrefixes": ["20.71.144.0/20"],
+        "networkFeatures": ["API"]
+      }
+    }
+  ]
+}

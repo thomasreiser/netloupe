@@ -1,0 +1,14 @@
+id = "hetzner"
+name = "Hetzner"
+kind = ["cloud"]
+
+# No official machine-readable IP range list is published, so detection
+# relies on ASN matching only.
+[asn]
+numbers = [24940]
+
+[[signal]]
+layer = "origin"
+type = "ptr"
+pattern = "*.your-server.de"
+weight = 60
