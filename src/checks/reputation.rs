@@ -12,6 +12,7 @@ use tokio::sync::mpsc;
 
 use super::CheckContext;
 use crate::event::{CheckEvent, CheckUpdate};
+use crate::retry::{self, Failure};
 
 /// Well-known public DNSBLs that don't require registration to query.
 const DNSBL_ZONES: &[&str] = &[
@@ -122,47 +123,66 @@ async fn query_dnsbl(ip: Ipv4Addr, zone: &str, opts: crate::checks::dns::DnsOpts
 }
 
 /// The Tor Project publishes a plain-text list of current exit-node IPs,
-/// refreshed roughly hourly; no key needed.
+/// refreshed roughly hourly; no key needed. Retried (see `crate::retry`)
+/// since it's netloupe's own helper request to a third party, not a
+/// measurement of the target itself.
 async fn query_tor_exit_list(ip: Ipv4Addr, timeout: Duration) -> Result<bool, String> {
     let client = reqwest::Client::builder()
         .timeout(timeout)
         .user_agent(concat!("netloupe/", env!("CARGO_PKG_VERSION")))
         .build()
         .map_err(|e| e.to_string())?;
-    let body = client
-        .get("https://check.torproject.org/torbulkexitlist")
-        .send()
-        .await
-        .map_err(|e| e.to_string())?
-        .text()
-        .await
-        .map_err(|e| e.to_string())?;
     let needle = ip.to_string();
-    Ok(body.lines().any(|line| line.trim() == needle))
+
+    retry::run(&retry::Policy::default(), || async {
+        let response = client
+            .get("https://check.torproject.org/torbulkexitlist")
+            .send()
+            .await
+            .map_err(retry::classify_send_error)?;
+        if !response.status().is_success() {
+            return Err(retry::classify_status(response.status()));
+        }
+        let body = response
+            .text()
+            .await
+            .map_err(|e| Failure::Retryable(e.to_string()))?;
+        Ok(body.lines().any(|line| line.trim() == needle))
+    })
+    .await
 }
 
+/// Retried like `query_tor_exit_list` above -- AbuseIPDB is a third-party
+/// helper, not the target itself.
 async fn query_abuseipdb(ip: Ipv4Addr, key: &str, timeout: Duration) -> Result<u8, String> {
     let client = reqwest::Client::builder()
         .timeout(timeout)
         .build()
         .map_err(|e| e.to_string())?;
-    let response = client
-        .get("https://api.abuseipdb.com/api/v2/check")
-        .query(&[("ipAddress", ip.to_string())])
-        .header("Key", key)
-        .header("Accept", "application/json")
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-    if !response.status().is_success() {
-        return Err(format!("AbuseIPDB returned {}", response.status()));
-    }
-    let body: serde_json::Value = response.json().await.map_err(|e| e.to_string())?;
-    body.get("data")
-        .and_then(|d| d.get("abuseConfidenceScore"))
-        .and_then(|s| s.as_u64())
-        .map(|s| s.min(100) as u8)
-        .ok_or_else(|| "unexpected response shape".to_string())
+
+    retry::run(&retry::Policy::default(), || async {
+        let response = client
+            .get("https://api.abuseipdb.com/api/v2/check")
+            .query(&[("ipAddress", ip.to_string())])
+            .header("Key", key)
+            .header("Accept", "application/json")
+            .send()
+            .await
+            .map_err(retry::classify_send_error)?;
+        if !response.status().is_success() {
+            return Err(retry::classify_status(response.status()));
+        }
+        let body: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|e| Failure::Retryable(e.to_string()))?;
+        body.get("data")
+            .and_then(|d| d.get("abuseConfidenceScore"))
+            .and_then(|s| s.as_u64())
+            .map(|s| s.min(100) as u8)
+            .ok_or_else(|| Failure::Fatal("unexpected response shape".to_string()))
+    })
+    .await
 }
 
 #[cfg(test)]

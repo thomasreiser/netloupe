@@ -12,6 +12,7 @@ use tokio::sync::mpsc;
 
 use super::CheckContext;
 use crate::event::{CheckEvent, CheckUpdate};
+use crate::retry::{self, Failure};
 
 /// Where an IP address falls in the address-space taxonomy. `Global` means
 /// none of the special-purpose ranges apply, i.e. it's routable on the
@@ -282,6 +283,9 @@ fn parse_as_name_txt(txt: &str) -> Option<String> {
     txt.split('|').nth(4).map(|s| s.trim().to_string())
 }
 
+/// Retried (see `crate::retry`): `rdap.org` (a bootstrap redirector to
+/// whichever RIR actually holds the record) is netloupe's own helper
+/// request, not the target itself.
 async fn lookup_rdap(ip: IpAddr, timeout: Duration) -> Result<RdapInfo, String> {
     let url = format!("https://rdap.org/ip/{ip}");
     let client = reqwest::Client::builder()
@@ -290,13 +294,23 @@ async fn lookup_rdap(ip: IpAddr, timeout: Duration) -> Result<RdapInfo, String> 
         .build()
         .map_err(|e| e.to_string())?;
 
-    let response = client.get(&url).send().await.map_err(|e| e.to_string())?;
-    if !response.status().is_success() {
-        return Err(format!("RDAP server returned {}", response.status()));
-    }
-    let registry_url = response.url().to_string();
-    let body: Value = response.json().await.map_err(|e| e.to_string())?;
-    Ok(parse_rdap(&body, registry_url))
+    retry::run(&retry::Policy::default(), || async {
+        let response = client
+            .get(&url)
+            .send()
+            .await
+            .map_err(retry::classify_send_error)?;
+        if !response.status().is_success() {
+            return Err(retry::classify_status(response.status()));
+        }
+        let registry_url = response.url().to_string();
+        let body: Value = response
+            .json()
+            .await
+            .map_err(|e| Failure::Retryable(e.to_string()))?;
+        Ok(parse_rdap(&body, registry_url))
+    })
+    .await
 }
 
 fn parse_rdap(body: &Value, registry_url: String) -> RdapInfo {
