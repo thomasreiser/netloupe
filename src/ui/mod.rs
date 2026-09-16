@@ -513,7 +513,11 @@ fn render_select_alt_name(
 }
 
 fn render_help(frame: &mut Frame, area: Rect) {
-    let popup = centered_rect(56, 60, area);
+    // Tall enough that all the rows below actually fit at a standard
+    // 24-row terminal (60% of 24 rows, minus the popup's own border,
+    // clipped the last couple of rows even before the mouse-support row
+    // was added).
+    let popup = centered_rect(56, 75, area);
     frame.render_widget(Clear, popup);
     let block = theme::panel_with_hint("Help", "? / esc to close", theme::MUTED, theme::PURPLE);
     let inner = block.inner(popup);
@@ -545,6 +549,10 @@ fn render_help(frame: &mut Frame, area: Rect) {
         row("s", "Open the settings editor"),
         row("?", "Help overlay"),
         row("q", "Quit"),
+        row(
+            "mouse",
+            "Click a tab to switch, scroll to scroll (additive)",
+        ),
     ];
     frame.render_widget(Paragraph::new(lines), inner);
 }

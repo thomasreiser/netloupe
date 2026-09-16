@@ -329,6 +329,8 @@ Config lives at `$XDG_CONFIG_HOME/netloupe/config.toml`. Every option has a sens
 | `?` | Help overlay |
 | `q` | Quit |
 
+Mouse support is additive, not a replacement for the keyboard: click a host tab or the "+ new" label to switch/open one, click a pane tab to switch panes, and scroll the wheel anywhere to scroll the active pane's content. Only live in `Mode::Normal` and the two y/n confirm prompts (a click during any other modal popup, e.g. the settings editor or a text prompt, does nothing, matching how most keys are handled then). Decoded in `app.rs`'s `decode_mouse`, using `ui::tabs::host_tab_at`/`pane_tab_at`/`new_tab_label_at` for hit-testing against the exact widths `ui::tabs` renders, so the two can never drift apart.
+
 ## Roadmap
 
 1. **MVP:** tabs, target parsing, DNS pane, ICMP/TCP ping, Overview

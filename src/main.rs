@@ -523,7 +523,12 @@ async fn run_tui(hosts: Vec<String>) -> anyhow::Result<()> {
             "could not start the terminal UI (is this running in an interactive terminal?): {err}"
         )
     })?;
+    // Best-effort: some terminals/multiplexers don't support mouse
+    // tracking at all, and the app is fully usable from the keyboard
+    // alone either way, so a failure here isn't fatal.
+    let _ = crossterm::execute!(std::io::stdout(), crossterm::event::EnableMouseCapture);
     let result = app::run(terminal, config, providers, targets).await;
+    let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture);
     ratatui::restore();
     result
 }

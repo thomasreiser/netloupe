@@ -72,6 +72,8 @@ see `Config` in `src/config.rs` for every field and its default).
 | `?`                          | Help overlay                                           |
 | `q`                          | Quit                                                   |
 
+Mouse support is additive: click a host tab or "+ new" to switch/open one, click a pane tab to switch panes, and scroll to scroll the active pane's content.
+
 ## Development
 
 ```bash
