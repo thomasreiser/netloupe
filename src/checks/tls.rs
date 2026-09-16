@@ -36,6 +36,11 @@ pub struct TlsResult {
     pub not_after_unix: Option<i64>,
     pub days_until_expiry: Option<i64>,
     pub chain_len: usize,
+    /// CA identification and ACME DNS-01/HTTP-01 challenge analysis; see
+    /// `checks::acme`. `None` when the issuer isn't a CA this module
+    /// recognizes (nothing ACME-specific to say), not yet computed, or the
+    /// certificate itself failed to parse.
+    pub acme: Option<crate::checks::acme::AcmeInfo>,
     pub errors: Vec<String>,
 }
 
@@ -54,7 +59,7 @@ pub(crate) async fn run(ctx: CheckContext, tx: mpsc::Sender<CheckEvent>) {
             port,
             ..Default::default()
         };
-        connect_and_inspect(ip, &host.0, port, ctx.config.timeouts.tls, &mut result).await;
+        connect_and_inspect(ip, &host.0, port, &ctx.config.timeouts, &mut result).await;
 
         ctx.shared.set_tls(result.clone()).await;
         Ok(CheckUpdate::Tls(result))
@@ -66,7 +71,7 @@ async fn connect_and_inspect(
     ip: IpAddr,
     sni: &str,
     port: u16,
-    timeout: std::time::Duration,
+    timeouts: &crate::config::TimeoutConfig,
     result: &mut TlsResult,
 ) {
     let config = client_config();
@@ -109,11 +114,18 @@ async fn connect_and_inspect(
         Ok::<(), String>(())
     };
 
-    if let Err(err) = tokio::time::timeout(timeout, attempt)
+    if let Err(err) = tokio::time::timeout(timeouts.tls, attempt)
         .await
         .unwrap_or_else(|_| Err("TLS handshake timed out".to_string()))
     {
         result.errors.push(err);
+        return;
+    }
+
+    if let Some(issuer) = result.issuer.clone() {
+        let domain = super::acme::domain_for_target(sni);
+        result.acme =
+            super::acme::inspect(domain, &result.sans, &issuer, timeouts.dns, timeouts.http).await;
     }
 }
 

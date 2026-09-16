@@ -7,6 +7,7 @@
 //! panicking check would otherwise silently stop updating its pane, so
 //! every `run` body should prefer returning an error to unwrapping.
 
+pub mod acme;
 pub mod dns;
 pub mod geo;
 pub mod hosting;
