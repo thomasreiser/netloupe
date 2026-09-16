@@ -69,17 +69,44 @@ pub fn render(frame: &mut Frame, area: Rect, tab: &TabState, geoip: &GeoipStatus
         return;
     }
 
-    let chunks = ratatui::layout::Layout::default()
-        .direction(ratatui::layout::Direction::Vertical)
+    // A map only means anything once there's a coordinate to zoom to --
+    // otherwise this is exactly the old single-column layout.
+    let table_area = match (geo.lat, geo.lon) {
+        (Some(lat), Some(lon)) => {
+            let columns = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Length(34), Constraint::Min(20)])
+                .split(body);
+            render_map(frame, columns[1], lat, lon);
+            columns[0]
+        }
+        _ => body,
+    };
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
         .constraints([
-            ratatui::layout::Constraint::Min(0),
-            ratatui::layout::Constraint::Length(geo.errors.len().min(4) as u16),
+            Constraint::Min(0),
+            Constraint::Length(geo.errors.len().min(4) as u16),
         ])
-        .split(body);
+        .split(table_area);
     crate::ui::widgets::kv_table::render(frame, chunks[0], &rows, tab.scroll);
     if !geo.errors.is_empty() {
         frame.render_widget(super::errors_widget(&geo.errors), chunks[1]);
     }
+}
+
+/// The world map, zoomed to `(lat, lon)` with a pinpoint and the nearest
+/// major city name(s) -- see `crate::worldmap` for the actual projection/
+/// zoom/labeling logic; this just draws whatever grid it produces at
+/// `area`'s exact size, live, on every render (see `worldmap::render_map`'s
+/// doc comment for why that's cheap enough to redo every frame).
+fn render_map(frame: &mut Frame, area: Rect, lat: f64, lon: f64) {
+    let block = theme::panel("Map", theme::pane_accent(crate::app::Pane::Geo));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let grid = crate::worldmap::render_map(lat, lon, inner.width, inner.height);
+    frame.render_widget(crate::ui::widgets::worldmap::widget(&grid), inner);
 }
 
 /// Live status of the GeoLite2 background downloader (see `crate::geoip`),

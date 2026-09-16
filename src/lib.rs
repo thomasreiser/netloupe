@@ -14,3 +14,4 @@ pub mod retry;
 pub mod settings;
 pub mod target;
 pub mod ui;
+pub mod worldmap;

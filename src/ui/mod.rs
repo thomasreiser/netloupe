@@ -757,6 +757,27 @@ mod tests {
             },
         );
 
+        let geo = crate::checks::geo::GeoResult {
+            ip: Some(target_ip),
+            country: Some("United States".into()),
+            country_code: Some("US".into()),
+            region: Some("Virginia".into()),
+            city: Some("Norfolk".into()),
+            lat: Some(36.8508),
+            lon: Some(-76.2859),
+            timezone: Some("America/New_York".into()),
+            asn_org: Some("Example Org".into()),
+            accuracy_hint: Some("city-level"),
+            errors: Vec::new(),
+        };
+        tab.checks.insert(
+            CheckId::Geo,
+            CheckSlot {
+                status: CheckStatus::Done,
+                update: Some(CheckUpdate::Geo(geo)),
+            },
+        );
+
         tab
     }
 
@@ -839,6 +860,30 @@ mod tests {
             content.matches("GeoIP: 3h old").count(),
             2,
             "expected the status text once on the status line and once in the Geo pane: {content}"
+        );
+    }
+
+    /// Once a check has a coordinate, the Geo pane must show the world
+    /// map (see `worldmap::render_map`) with a pinpoint on it, not just
+    /// the plain country/city table.
+    #[test]
+    fn geo_pane_renders_a_map_with_a_pin_when_coordinates_are_present() {
+        let mut state = AppState::new(Config::default(), ProviderDb::default());
+        state.tabs.push(populated_tab());
+        state.tabs[0].active_pane = Pane::ALL.iter().position(|&p| p == Pane::Geo).unwrap();
+
+        let backend = TestBackend::new(120, 36);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| draw(frame, &state)).unwrap();
+
+        let content = buffer_to_string(terminal.backend().buffer());
+        assert!(
+            content.contains("Map"),
+            "expected the map sub-panel title: {content}"
+        );
+        assert!(
+            content.contains('◉'),
+            "expected the pinpoint glyph somewhere on screen: {content}"
         );
     }
 
@@ -961,6 +1006,10 @@ mod tests {
         println!("{}", buffer_to_string(terminal.backend().buffer()));
 
         state.tabs[0].active_pane = Pane::ALL.iter().position(|&p| p == Pane::Hosting).unwrap();
+        terminal.draw(|frame| draw(frame, &state)).unwrap();
+        println!("{}", buffer_to_string(terminal.backend().buffer()));
+
+        state.tabs[0].active_pane = Pane::ALL.iter().position(|&p| p == Pane::Geo).unwrap();
         terminal.draw(|frame| draw(frame, &state)).unwrap();
         println!("{}", buffer_to_string(terminal.backend().buffer()));
     }
