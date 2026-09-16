@@ -120,21 +120,46 @@ fn render_status_line(frame: &mut Frame, area: Rect, state: &AppState) {
         key("R"),
         desc(" rerun all "),
         sep(),
-        key("e"),
-        desc(" evidence "),
-        sep(),
-        key("a"),
-        desc(" alt. hosts "),
-        sep(),
-        key("w"),
-        desc(" zone walk "),
-        sep(),
-        key("s"),
-        desc(" settings "),
-        sep(),
-        key("q"),
-        desc(" quit"),
     ];
+
+    // Only the keys that actually do something on the pane you're
+    // looking at, rather than a fixed list that includes bindings like
+    // `w` (zone walk) that are meaningless anywhere but DNS.
+    let active_pane = state
+        .active()
+        .and_then(|tab| crate::app::Pane::ALL.get(tab.active_pane).copied());
+    match active_pane {
+        Some(crate::app::Pane::Overview) => {
+            spans.push(key("a"));
+            spans.push(desc(" alt. hosts "));
+            spans.push(sep());
+        }
+        Some(crate::app::Pane::Dns) => {
+            spans.push(key("w"));
+            spans.push(desc(" zone walk "));
+            spans.push(sep());
+        }
+        Some(crate::app::Pane::Hosting) => {
+            spans.push(key("e"));
+            spans.push(desc(" evidence "));
+            spans.push(sep());
+        }
+        Some(crate::app::Pane::PingTrace) => {
+            spans.push(key("space"));
+            spans.push(desc(" pause ping "));
+            spans.push(sep());
+        }
+        _ => {}
+    }
+
+    spans.push(key("y"));
+    spans.push(desc(" copy "));
+    spans.push(sep());
+    spans.push(key("s"));
+    spans.push(desc(" settings "));
+    spans.push(sep());
+    spans.push(key("q"));
+    spans.push(desc(" quit"));
     if let Some(warning) = &state.data_age_warning {
         spans.push(Span::raw("   "));
         spans.push(Span::styled(
@@ -815,6 +840,46 @@ mod tests {
             2,
             "expected the status text once on the status line and once in the Geo pane: {content}"
         );
+    }
+
+    /// The status line's keybinding hints should only include a pane-
+    /// specific action (zone walk, evidence, alt. hosts, pause ping) when
+    /// that pane is actually active -- a fixed list would show `w` on
+    /// every pane even though it only does anything on DNS.
+    #[test]
+    fn status_line_only_shows_the_active_panes_keybinding() {
+        let mut state = AppState::new(Config::default(), ProviderDb::default());
+        state.tabs.push(populated_tab());
+
+        let status_line_for = |state: &AppState| -> String {
+            let backend = TestBackend::new(160, 40);
+            let mut terminal = Terminal::new(backend).unwrap();
+            terminal.draw(|frame| draw(frame, state)).unwrap();
+            buffer_to_string(terminal.backend().buffer())
+                .lines()
+                .find(|l| l.contains("^T"))
+                .unwrap()
+                .to_string()
+        };
+
+        for (pane, present, absent) in [
+            (Pane::Overview, "alt. hosts", "zone walk"),
+            (Pane::Dns, "zone walk", "evidence"),
+            (Pane::Hosting, "evidence", "pause ping"),
+            (Pane::PingTrace, "pause ping", "alt. hosts"),
+            (Pane::Rep, "quit", "zone walk"),
+        ] {
+            state.tabs[0].active_pane = Pane::ALL.iter().position(|&p| p == pane).unwrap();
+            let line = status_line_for(&state);
+            assert!(
+                line.contains(present),
+                "{pane:?} should show {present:?}: {line}"
+            );
+            assert!(
+                !line.contains(absent),
+                "{pane:?} shouldn't show {absent:?}: {line}"
+            );
+        }
     }
 
     #[test]
