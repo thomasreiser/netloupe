@@ -4,12 +4,22 @@
 //! network access at runtime -- the same "ship a snapshot, refresh it
 //! with an xtask command" shape as `data/snapshot/`'s provider ranges.
 //!
-//! Source: Natural Earth's 1:110m public-domain vector data (the scale
-//! Natural Earth itself curates for small/low-res world maps), via its
-//! GitHub GeoJSON mirror. Rasterized onto a 1-degree-per-cell grid --
-//! deliberately coarse, matching the low-resolution/data-saving ask this
-//! feeds: 360x180 cells packed one bit each is ~8KB per bitmap, plenty
-//! fine for a map that only ever renders onto a terminal pane.
+//! Source: Natural Earth's public-domain vector data, via its GitHub
+//! GeoJSON mirror. Coastline/borders come from the 1:50m ("medium")
+//! set -- finer than the 1:110m set this used at first, which merged
+//! adjacent country borders in dense regions (e.g. central Europe) into
+//! a solid wash once rasterized; cities stay on 1:110m, since that's
+//! specifically the set Natural Earth curates down to world-significant
+//! places, and more detail there would mean more (less major) cities,
+//! not better major ones. Rasterized onto a 0.1-degree-per-cell grid:
+//! still deliberately coarse (a real vector renderer this isn't -- no
+//! anti-aliasing, no sub-cell line thickness), but fine enough that
+//! borders in a densely-partitioned region (e.g. Germany/Czechia/
+//! Austria/Switzerland) read as separate lines instead of a merged wash.
+//! 3600x1800 cells packed one bit each is ~790KB per bitmap -- still
+//! small next to a full-detail vector dataset, just not as aggressively
+//! tiny as an early 1-degree-grid version of this turned out to look in
+//! practice.
 
 use std::fs;
 use std::path::Path;
@@ -17,11 +27,12 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use serde_json::Value;
 
-const GRID_COLS: usize = 360;
-const GRID_ROWS: usize = 180;
+const GRID_COLS: usize = 3600;
+const GRID_ROWS: usize = 1800;
+const DEG_PER_CELL: f64 = 360.0 / GRID_COLS as f64;
 
-const COASTLINE_URL: &str = "https://raw.githubusercontent.com/nvkelso/natural-earth-vector/master/geojson/ne_110m_coastline.geojson";
-const COUNTRIES_URL: &str = "https://raw.githubusercontent.com/nvkelso/natural-earth-vector/master/geojson/ne_110m_admin_0_countries.geojson";
+const COASTLINE_URL: &str = "https://raw.githubusercontent.com/nvkelso/natural-earth-vector/master/geojson/ne_50m_coastline.geojson";
+const COUNTRIES_URL: &str = "https://raw.githubusercontent.com/nvkelso/natural-earth-vector/master/geojson/ne_50m_admin_0_countries.geojson";
 const PLACES_URL: &str = "https://raw.githubusercontent.com/nvkelso/natural-earth-vector/master/geojson/ne_110m_populated_places.geojson";
 
 /// Natural Earth's 110m populated-places layer is already curated down to
@@ -52,8 +63,11 @@ pub fn update_geo_data(repo_root: &Path) -> Result<()> {
         }
     }
     println!("{} cells", coast_bits.count());
-    fs::write(geo_dir.join("coastline_1deg.bin"), coast_bits.into_bytes())
-        .context("writing coastline_1deg.bin")?;
+    fs::write(
+        geo_dir.join("coastline_0.1deg.bin"),
+        coast_bits.into_bytes(),
+    )
+    .context("writing coastline_0.1deg.bin")?;
 
     print!("fetching country borders ... ");
     let countries = fetch_json(&client, COUNTRIES_URL)?;
@@ -64,8 +78,8 @@ pub fn update_geo_data(repo_root: &Path) -> Result<()> {
         }
     }
     println!("{} cells", border_bits.count());
-    fs::write(geo_dir.join("borders_1deg.bin"), border_bits.into_bytes())
-        .context("writing borders_1deg.bin")?;
+    fs::write(geo_dir.join("borders_0.1deg.bin"), border_bits.into_bytes())
+        .context("writing borders_0.1deg.bin")?;
 
     print!("fetching populated places ... ");
     let places = fetch_json(&client, PLACES_URL)?;
@@ -174,8 +188,9 @@ fn polygon_rings(geometry: &Value) -> Vec<Vec<(f64, f64)>> {
     }
 }
 
-/// A packed one-degree-per-cell world grid, `GRID_ROWS` (latitude, north
-/// to south) x `GRID_COLS` (longitude, -180 to +180) cells, one bit each.
+/// A packed `DEG_PER_CELL`-per-cell world grid, `GRID_ROWS` (latitude,
+/// north to south) x `GRID_COLS` (longitude, -180 to +180) cells, one bit
+/// each.
 struct Bitmap {
     bytes: Vec<u8>,
 }
@@ -208,12 +223,12 @@ fn grid_cell(lat: f64, lon: f64) -> Option<(usize, usize)> {
     if !(-90.0..=90.0).contains(&lat) {
         return None;
     }
-    let row = ((90.0 - lat) as usize).min(GRID_ROWS - 1);
-    let col = ((lon + 180.0).rem_euclid(360.0) as usize).min(GRID_COLS - 1);
+    let row = (((90.0 - lat) / DEG_PER_CELL) as usize).min(GRID_ROWS - 1);
+    let col = ((((lon + 180.0).rem_euclid(360.0)) / DEG_PER_CELL) as usize).min(GRID_COLS - 1);
     Some((row, col))
 }
 
-/// Walks every point along a polyline (already just vertices, at 110m
+/// Walks every point along a polyline (already just vertices, at 50m
 /// simplification), plus enough interpolated points between each pair
 /// that no grid cell along the way gets skipped, marking every cell it
 /// touches.
@@ -230,9 +245,9 @@ fn rasterize_line(points: &[(f64, f64)], bitmap: &mut Bitmap) {
 }
 
 fn rasterize_segment(a: (f64, f64), b: (f64, f64), bitmap: &mut Bitmap) {
-    // Step finely enough (a fraction of a degree) that a long segment
-    // can't hop over a grid cell it actually crosses.
-    let steps = ((a.0 - b.0).abs().max((a.1 - b.1).abs()) / 0.4)
+    // Step finely enough (a fraction of a grid cell) that a long segment
+    // can't hop over a cell it actually crosses.
+    let steps = ((a.0 - b.0).abs().max((a.1 - b.1).abs()) / (DEG_PER_CELL / 2.0))
         .ceil()
         .max(1.0) as usize;
     for i in 0..=steps {
@@ -252,11 +267,11 @@ mod tests {
     #[test]
     fn grid_cell_maps_known_points_to_the_expected_cell() {
         // The north pole side, prime meridian/equator crossing.
-        assert_eq!(grid_cell(89.9, 0.0), Some((0, 180)));
-        assert_eq!(grid_cell(0.0, 0.0), Some((90, 180)));
+        assert_eq!(grid_cell(89.9, 0.0), Some((0, 1800)));
+        assert_eq!(grid_cell(0.0, 0.0), Some((900, 1800)));
         // The antimeridian wraps rather than going out of bounds.
-        assert_eq!(grid_cell(0.0, -180.0), Some((90, 0)));
-        assert_eq!(grid_cell(0.0, 180.0), Some((90, 0)));
+        assert_eq!(grid_cell(0.0, -180.0), Some((900, 0)));
+        assert_eq!(grid_cell(0.0, 180.0), Some((900, 0)));
     }
 
     #[test]

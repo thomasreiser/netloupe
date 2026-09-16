@@ -11,11 +11,12 @@
 
 use std::sync::OnceLock;
 
-const GRID_COLS: usize = 360;
-const GRID_ROWS: usize = 180;
+const GRID_COLS: usize = 3600;
+const GRID_ROWS: usize = 1800;
+const DEG_PER_CELL: f64 = 360.0 / GRID_COLS as f64;
 
-static COASTLINE_BITS: &[u8] = include_bytes!("../data/geo/coastline_1deg.bin");
-static BORDER_BITS: &[u8] = include_bytes!("../data/geo/borders_1deg.bin");
+static COASTLINE_BITS: &[u8] = include_bytes!("../data/geo/coastline_0.1deg.bin");
+static BORDER_BITS: &[u8] = include_bytes!("../data/geo/borders_0.1deg.bin");
 static CITIES_CSV: &str = include_str!("../data/geo/cities.csv");
 
 /// A terminal character is roughly twice as tall as it is wide; without
@@ -28,6 +29,15 @@ const CHAR_ASPECT: f64 = 2.0;
 /// at least one major city's label, per the "zoom out far enough that a
 /// big city name is visible" brief.
 const LAT_SPAN_PRESETS: &[f64] = &[10.0, 20.0, 40.0, 70.0, 110.0, 170.0];
+
+/// Country borders only render at this span or tighter. Political
+/// boundaries are densest exactly where continents are crowded with
+/// small countries (central Europe, ...); at a wide zoom that density
+/// reads as a solid wash rather than lines, drowning out the coastline
+/// shape that actually orients the viewer. Coastlines have no such
+/// gating -- they're the map's primary "what shape is this" signal at
+/// every zoom.
+const MAX_BORDER_LAT_SPAN: f64 = 45.0;
 
 /// Below this population a place isn't "a big city" for labeling
 /// purposes, even though it's in the (already curated) embedded table.
@@ -108,10 +118,10 @@ impl MapGrid {
 /// city in the embedded table.
 ///
 /// Cheap enough to call fresh on every render rather than caching: at
-/// most a few hundred grid cells, each a handful of capped bitmap
-/// lookups against an ~8KB array, plus a linear scan of ~250 embedded
-/// cities -- no unbounded work, nothing that scales with the terminal
-/// growing beyond "still fits on a screen".
+/// most a few hundred grid cells, each a capped number of bitmap lookups
+/// (see `cell_hits`), plus a linear scan of ~250 embedded cities -- no
+/// unbounded work, nothing that scales with the terminal growing beyond
+/// "still fits on a screen".
 pub fn render_map(target_lat: f64, target_lon: f64, width: u16, height: u16) -> MapGrid {
     let width = width.max(20);
     let height = height.max(6);
@@ -142,19 +152,30 @@ fn render_at(
 ) -> (MapGrid, bool) {
     let mut grid = MapGrid::blank(width, height);
 
+    let show_borders = lat_span <= MAX_BORDER_LAT_SPAN;
     for row in 0..height {
         for col in 0..width {
-            if cell_hits(
-                BORDER_BITS,
-                target_lat,
-                target_lon,
-                lat_span,
-                lon_span,
-                width,
-                height,
-                row,
-                col,
-            ) {
+            // Dashed in screen space (every other cell), the
+            // conventional way a political border reads as distinct
+            // from a coastline on a paper map -- and, in a
+            // densely-partitioned region where many countries' borders
+            // pass close together, the difference between "a wall of
+            // solid dots" and "a legible texture of lines".
+            let on_dash = (row + col) % 2 == 0;
+            if show_borders
+                && on_dash
+                && cell_hits(
+                    BORDER_BITS,
+                    target_lat,
+                    target_lon,
+                    lat_span,
+                    lon_span,
+                    width,
+                    height,
+                    row,
+                    col,
+                )
+            {
                 grid.set(row, col, Cell::Border);
             }
             // Checked second so a cell that's both a coast and (as most
@@ -334,9 +355,11 @@ fn cell_hits(
     let lon_left = center_lon + (col as f64 - width as f64 / 2.0) * deg_per_col;
     let lon_right = lon_left + deg_per_col;
 
-    const MAX_SAMPLES_PER_AXIS: i32 = 6;
-    let lat_steps = (deg_per_row.abs().ceil() as i32).clamp(1, MAX_SAMPLES_PER_AXIS);
-    let lon_steps = (deg_per_col.abs().ceil() as i32).clamp(1, MAX_SAMPLES_PER_AXIS);
+    const MAX_SAMPLES_PER_AXIS: i32 = 10;
+    let lat_steps =
+        ((deg_per_row.abs() / DEG_PER_CELL).ceil() as i32).clamp(1, MAX_SAMPLES_PER_AXIS);
+    let lon_steps =
+        ((deg_per_col.abs() / DEG_PER_CELL).ceil() as i32).clamp(1, MAX_SAMPLES_PER_AXIS);
 
     for i in 0..=lat_steps {
         let lat = lat_bottom + (lat_top - lat_bottom) * (i as f64 / lat_steps as f64);
@@ -352,15 +375,15 @@ fn cell_hits(
     false
 }
 
-/// Maps `(lat, lon)` to its 1-degree embedded-grid cell. Must match
-/// `xtask`'s `geo.rs::grid_cell` exactly, since that's what wrote the
-/// bitmaps this reads.
+/// Maps `(lat, lon)` to its embedded-grid cell. Must match `xtask`'s
+/// `geo.rs::grid_cell` exactly, since that's what wrote the bitmaps this
+/// reads.
 fn grid_cell(lat: f64, lon: f64) -> Option<(usize, usize)> {
     if !(-90.0..=90.0).contains(&lat) {
         return None;
     }
-    let row = ((90.0 - lat) as usize).min(GRID_ROWS - 1);
-    let col = ((lon + 180.0).rem_euclid(360.0) as usize).min(GRID_COLS - 1);
+    let row = (((90.0 - lat) / DEG_PER_CELL) as usize).min(GRID_ROWS - 1);
+    let col = ((((lon + 180.0).rem_euclid(360.0)) / DEG_PER_CELL) as usize).min(GRID_COLS - 1);
     Some((row, col))
 }
 
@@ -385,10 +408,10 @@ mod tests {
 
     #[test]
     fn grid_cell_matches_known_points() {
-        assert_eq!(grid_cell(89.9, 0.0), Some((0, 180)));
-        assert_eq!(grid_cell(0.0, 0.0), Some((90, 180)));
-        assert_eq!(grid_cell(0.0, -180.0), Some((90, 0)));
-        assert_eq!(grid_cell(0.0, 180.0), Some((90, 0)));
+        assert_eq!(grid_cell(89.9, 0.0), Some((0, 1800)));
+        assert_eq!(grid_cell(0.0, 0.0), Some((900, 1800)));
+        assert_eq!(grid_cell(0.0, -180.0), Some((900, 0)));
+        assert_eq!(grid_cell(0.0, 180.0), Some((900, 0)));
     }
 
     #[test]
