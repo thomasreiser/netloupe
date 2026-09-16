@@ -69,6 +69,19 @@ pub fn draw(frame: &mut Frame, state: &AppState) {
         Mode::ChooseResolver { target, input } => {
             render_choose_resolver(frame, area, target, input)
         }
+        Mode::Settings {
+            draft,
+            selected,
+            editing,
+            message,
+        } => render_settings(
+            frame,
+            area,
+            draft,
+            *selected,
+            editing.as_deref(),
+            message.as_deref(),
+        ),
         Mode::Normal => {}
     }
 }
@@ -115,6 +128,9 @@ fn render_status_line(frame: &mut Frame, area: Rect, state: &AppState) {
         sep(),
         key("w"),
         desc(" zone walk "),
+        sep(),
+        key("s"),
+        desc(" settings "),
         sep(),
         key("q"),
         desc(" quit"),
@@ -217,6 +233,101 @@ fn render_choose_resolver(
         Span::styled("▏", Style::default().fg(theme::CYAN)),
     ]));
     frame.render_widget(text, chunks[1]);
+}
+
+fn render_settings(
+    frame: &mut Frame,
+    area: Rect,
+    draft: &crate::config::Config,
+    selected: usize,
+    editing: Option<&str>,
+    message: Option<&str>,
+) {
+    let popup = centered_rect(76, 80, area);
+    frame.render_widget(Clear, popup);
+    let hint = if editing.is_some() {
+        "enter confirm · esc cancel edit"
+    } else {
+        "↑/↓ select · enter edit · esc close"
+    };
+    let block = theme::panel_with_hint("Settings", hint, theme::MUTED, theme::CYAN);
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    let fields = crate::settings::fields();
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Min(3),
+            Constraint::Length(2),
+            Constraint::Length(if message.is_some() { 1 } else { 0 }),
+        ])
+        .split(inner);
+
+    const LABEL_WIDTH: usize = 26;
+    let items: Vec<ratatui::widgets::ListItem> = fields
+        .iter()
+        .enumerate()
+        .map(|(i, field)| {
+            let value = if i == selected {
+                editing
+                    .map(str::to_string)
+                    .unwrap_or_else(|| (field.get)(draft))
+            } else {
+                (field.get)(draft)
+            };
+            let value = if value.is_empty() {
+                "-".to_string()
+            } else {
+                value
+            };
+            ratatui::widgets::ListItem::new(Line::from(vec![
+                Span::styled(
+                    format!("{:<LABEL_WIDTH$}", field.label),
+                    Style::default()
+                        .fg(theme::LABEL)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(value, Style::default().fg(theme::TEXT)),
+            ]))
+        })
+        .collect();
+    let list = ratatui::widgets::List::new(items)
+        .highlight_style(
+            Style::default()
+                .fg(Color::Rgb(18, 18, 24))
+                .bg(theme::CYAN)
+                .add_modifier(Modifier::BOLD),
+        )
+        .highlight_symbol("❯ ");
+    let mut list_state = ratatui::widgets::ListState::default().with_selected(Some(selected));
+    frame.render_stateful_widget(list, chunks[0], &mut list_state);
+
+    let help_text = fields.get(selected).map(|f| f.help).unwrap_or_default();
+    let cursor = if editing.is_some() { "▏" } else { "" };
+    frame.render_widget(
+        Paragraph::new(vec![Line::from(Span::styled(
+            format!("{help_text}{cursor}"),
+            Style::default().fg(theme::FAINT),
+        ))])
+        .wrap(Wrap { trim: true }),
+        chunks[1],
+    );
+
+    if let Some(message) = message {
+        let color = if message.starts_with("saved") {
+            theme::GREEN
+        } else {
+            theme::RED
+        };
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                message,
+                Style::default().fg(color),
+            ))),
+            chunks[2],
+        );
+    }
 }
 
 fn render_confirm_ports(frame: &mut Frame, area: Rect) {
@@ -382,6 +493,7 @@ fn render_help(frame: &mut Frame, area: Rect) {
         row("a", "Open the alternative-hostname picker (Overview)"),
         row("w", "Walk an NSEC-signed zone for its full name list (DNS)"),
         row("y", "Copy the current pane as text"),
+        row("s", "Open the settings editor"),
         row("?", "Help overlay"),
         row("q", "Quit"),
     ];
@@ -642,6 +754,22 @@ mod tests {
                     },
                 ],
                 selected: 1,
+            },
+            Mode::ChooseResolver {
+                target: Target::parse("example.com").unwrap(),
+                input: "1.1.1.1".to_string(),
+            },
+            Mode::Settings {
+                draft: Box::new(Config::default()),
+                selected: 0,
+                editing: None,
+                message: None,
+            },
+            Mode::Settings {
+                draft: Box::new(Config::default()),
+                selected: 2,
+                editing: Some("in progress".to_string()),
+                message: Some("not a duration".to_string()),
             },
         ] {
             state.mode = mode;

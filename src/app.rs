@@ -5,6 +5,8 @@
 //! which are applied here too. `ui::*` only ever reads this state.
 
 use std::collections::BTreeMap;
+use std::net::IpAddr;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -12,8 +14,6 @@ use std::time::Duration;
 use ratatui::DefaultTerminal;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
-
-use std::net::IpAddr;
 
 use crate::checks::{self, CheckContext, CheckId, SharedResultsHandle};
 use crate::config::Config;
@@ -178,6 +178,20 @@ pub enum Mode {
         target: Target,
         input: String,
     },
+    /// The in-app settings editor: `draft` is a working copy of the
+    /// config edited field-by-field (see `crate::settings`), saved to
+    /// disk and applied to `AppState::config` immediately whenever a
+    /// field is successfully committed -- there's no separate unsaved
+    /// "draft state" to lose track of. `editing`, when `Some`, holds the
+    /// in-progress text for the field currently being retyped.
+    Settings {
+        draft: Box<Config>,
+        selected: usize,
+        editing: Option<String>,
+        /// Feedback from the last field commit (an error, or a brief
+        /// "saved" confirmation), shown under the list.
+        message: Option<String>,
+    },
 }
 
 pub struct AppState {
@@ -193,6 +207,13 @@ pub struct AppState {
     /// same one again is just Enter. `None` once no custom resolver has
     /// been chosen yet, or if the last choice was "system default".
     pub last_resolver: Option<IpAddr>,
+    /// Where the settings editor saves to. `None` if this platform's
+    /// config directory couldn't be determined (`Config::default_path`
+    /// failed) -- settings edits still apply for the session, just can't
+    /// persist. Overridable (see `#[cfg(test)]` construction below) so
+    /// tests exercising the settings flow never touch the user's real
+    /// config file.
+    pub config_path: Option<PathBuf>,
     next_tab_id: AtomicU64,
 }
 
@@ -207,6 +228,7 @@ impl AppState {
             providers: Arc::new(providers),
             data_age_warning: None,
             last_resolver: None,
+            config_path: Config::default_path().ok(),
             next_tab_id: AtomicU64::new(1),
         }
     }
@@ -426,6 +448,104 @@ impl AppState {
         }
     }
 
+    fn open_settings(&mut self) {
+        self.mode = Mode::Settings {
+            draft: Box::new((*self.config).clone()),
+            selected: 0,
+            editing: None,
+            message: None,
+        };
+    }
+
+    /// All key handling while `Mode::Settings` is active. Kept as its own
+    /// method (see the guard in `handle_action`) since committing a field
+    /// needs to update `self.config`/write `self.config_path` alongside
+    /// `self.mode`, which is awkward through the big tuple match every
+    /// other mode uses. Takes `self.mode` fully out via `mem::replace`
+    /// (rather than borrowing into it) so the rest of `self` stays freely
+    /// accessible throughout, then puts the (possibly updated) mode back
+    /// at the end -- simpler than juggling partial borrows.
+    fn handle_settings_action(&mut self, action: Action) {
+        let Mode::Settings {
+            mut draft,
+            mut selected,
+            mut editing,
+            mut message,
+        } = std::mem::replace(&mut self.mode, Mode::Normal)
+        else {
+            return;
+        };
+        let fields = crate::settings::fields();
+        let mut still_open = true;
+
+        match action {
+            Action::SelectUp if editing.is_none() => {
+                selected = selected.saturating_sub(1);
+            }
+            Action::SelectDown if editing.is_none() => {
+                if selected + 1 < fields.len() {
+                    selected += 1;
+                }
+            }
+            Action::InputChar(c) => {
+                if let Some(buf) = &mut editing {
+                    buf.push(c);
+                }
+            }
+            Action::InputBackspace => {
+                if let Some(buf) = &mut editing {
+                    buf.pop();
+                }
+            }
+            Action::InputSubmit => {
+                if let Some(input) = editing.take() {
+                    if let Some(field) = fields.get(selected) {
+                        match (field.set)(&mut draft, &input) {
+                            Ok(()) => {
+                                let write_err = self
+                                    .config_path
+                                    .as_ref()
+                                    .and_then(|path| draft.save(path).err());
+                                self.config = Arc::new((*draft).clone());
+                                message = Some(match (&self.config_path, write_err) {
+                                    (None, _) => "saved for this session only (no config directory for this platform)".to_string(),
+                                    (Some(_), Some(err)) => format!("applied for this session, but failed to save: {err}"),
+                                    (Some(_), None) => "saved".to_string(),
+                                });
+                            }
+                            Err(err) => {
+                                message = Some(err);
+                                editing = Some(input);
+                            }
+                        }
+                    }
+                } else if let Some(field) = fields.get(selected) {
+                    editing = Some((field.get)(&draft));
+                    message = None;
+                }
+            }
+            Action::InputCancel => {
+                if editing.is_some() {
+                    editing = None;
+                } else {
+                    still_open = false;
+                }
+            }
+            _ => {}
+        }
+
+        self.mode = if still_open {
+            Mode::Settings {
+                draft,
+                selected,
+                editing,
+                message,
+            }
+        } else {
+            Mode::Normal
+        };
+    }
+
     pub fn close_active_tab(&mut self) {
         if self.tabs.is_empty() {
             return;
@@ -460,6 +580,15 @@ impl AppState {
     }
 
     fn handle_action(&mut self, action: Action, sender: &mpsc::Sender<CheckEvent>) {
+        // Handled separately (not folded into the big match below): a
+        // commit needs to write `self.config`/`self.config_path` while
+        // `self.mode` is also mutably in play, which is awkward through
+        // `match (&mut self.mode, action)`'s single borrow of `self.mode`.
+        if matches!(self.mode, Mode::Settings { .. }) {
+            self.handle_settings_action(action);
+            return;
+        }
+
         match (&mut self.mode, action) {
             (Mode::NewHostPrompt(buf), Action::InputChar(c)) => buf.push(c),
             (Mode::NewHostPrompt(buf), Action::InputBackspace) => {
@@ -610,6 +739,7 @@ impl AppState {
             Action::ToggleHelp => self.mode = Mode::Help,
             Action::OpenAltNames => self.open_alt_names_picker(),
             Action::OpenZoneWalk => self.open_zone_walk_confirm(),
+            Action::OpenSettings => self.open_settings(),
             Action::CopyPane => {} // clipboard support is a later addition; no-op for now.
             _ => {}
         }
@@ -737,6 +867,24 @@ fn decode_key(mode: &Mode, key: crossterm::event::KeyEvent) -> Action {
             KeyCode::Esc | KeyCode::Char('q') => Action::InputCancel,
             _ => Action::None,
         },
+        // While actively retyping a field's value: plain text input.
+        Mode::Settings {
+            editing: Some(_), ..
+        } => match key.code {
+            KeyCode::Char(c) => Action::InputChar(c),
+            KeyCode::Backspace => Action::InputBackspace,
+            KeyCode::Enter => Action::InputSubmit,
+            KeyCode::Esc => Action::InputCancel,
+            _ => Action::None,
+        },
+        // Otherwise: browsing the field list.
+        Mode::Settings { editing: None, .. } => match key.code {
+            KeyCode::Up | KeyCode::Char('k') => Action::SelectUp,
+            KeyCode::Down | KeyCode::Char('j') => Action::SelectDown,
+            KeyCode::Enter => Action::InputSubmit,
+            KeyCode::Esc | KeyCode::Char('q') => Action::InputCancel,
+            _ => Action::None,
+        },
         Mode::Normal => decode_normal_key(key),
     }
 }
@@ -779,6 +927,7 @@ fn decode_normal_key(key: crossterm::event::KeyEvent) -> Action {
         KeyCode::Char('a') => Action::OpenAltNames,
         KeyCode::Char('w') => Action::OpenZoneWalk,
         KeyCode::Char('y') => Action::CopyPane,
+        KeyCode::Char('s') => Action::OpenSettings,
         KeyCode::Char('?') => Action::ToggleHelp,
         KeyCode::Char('q') => Action::Quit,
         _ => Action::None,
@@ -1119,5 +1268,103 @@ mod tests {
             state.tabs[0].ports_confirmed, None,
             "navigating away shouldn't record a yes/no decision"
         );
+    }
+
+    /// The full settings-editor flow: open, navigate to a field, edit it,
+    /// commit it, and confirm both that `AppState::config` picked up the
+    /// change immediately and that it was written to disk -- using a
+    /// tempdir path (never the user's real config file) so this is safe
+    /// to run as an automated test.
+    #[tokio::test]
+    async fn editing_a_setting_applies_it_and_saves_to_disk() {
+        let mut state = AppState::new(Config::default(), ProviderDb::default());
+        let dir = tempfile::tempdir().unwrap();
+        state.config_path = Some(dir.path().join("config.toml"));
+        let tx = test_sender();
+
+        state.handle_action(Action::OpenSettings, &tx);
+        assert!(matches!(state.mode, Mode::Settings { .. }));
+
+        // "Theme" is the last field in `settings::fields()`; walk down to
+        // it rather than hard-coding an index that'd silently go stale
+        // if the field list is reordered.
+        let theme_index = crate::settings::fields()
+            .iter()
+            .position(|f| f.label == "Theme")
+            .unwrap();
+        for _ in 0..theme_index {
+            state.handle_action(Action::SelectDown, &tx);
+        }
+
+        state.handle_action(Action::InputSubmit, &tx); // start editing
+        let Mode::Settings { editing, .. } = &state.mode else {
+            panic!("expected Settings mode");
+        };
+        assert_eq!(
+            editing.as_deref(),
+            Some("default"),
+            "pre-filled with the current value"
+        );
+
+        // Replace the pre-filled value: backspace it away, type the new one.
+        for _ in 0.."default".len() {
+            state.handle_action(Action::InputBackspace, &tx);
+        }
+        for c in "solarized".chars() {
+            state.handle_action(Action::InputChar(c), &tx);
+        }
+        state.handle_action(Action::InputSubmit, &tx); // commit
+
+        assert_eq!(state.config.theme, "solarized");
+        let Mode::Settings {
+            editing, message, ..
+        } = &state.mode
+        else {
+            panic!("expected Settings mode");
+        };
+        assert!(editing.is_none(), "commit should leave edit mode");
+        assert_eq!(message.as_deref(), Some("saved"));
+
+        let saved = Config::load(state.config_path.as_ref().unwrap()).unwrap();
+        assert_eq!(saved.theme, "solarized");
+
+        state.handle_action(Action::InputCancel, &tx);
+        assert!(matches!(state.mode, Mode::Normal));
+    }
+
+    #[test]
+    fn invalid_setting_input_is_rejected_and_keeps_editing() {
+        let mut state = AppState::new(Config::default(), ProviderDb::default());
+        let dir = tempfile::tempdir().unwrap();
+        state.config_path = Some(dir.path().join("config.toml"));
+        let tx = test_sender();
+
+        state.handle_action(Action::OpenSettings, &tx);
+        let dns_timeout_index = crate::settings::fields()
+            .iter()
+            .position(|f| f.label == "DNS timeout")
+            .unwrap();
+        for _ in 0..dns_timeout_index {
+            state.handle_action(Action::SelectDown, &tx);
+        }
+        state.handle_action(Action::InputSubmit, &tx); // start editing
+        for _ in 0.."3s".len() {
+            state.handle_action(Action::InputBackspace, &tx);
+        }
+        for c in "not a duration".chars() {
+            state.handle_action(Action::InputChar(c), &tx);
+        }
+        state.handle_action(Action::InputSubmit, &tx); // attempt commit
+
+        // Unchanged: the bad input was rejected, not silently applied.
+        assert_eq!(state.config.timeouts.dns, Duration::from_secs(3));
+        let Mode::Settings {
+            editing, message, ..
+        } = &state.mode
+        else {
+            panic!("expected Settings mode");
+        };
+        assert_eq!(editing.as_deref(), Some("not a duration"));
+        assert!(message.is_some(), "should explain why it was rejected");
     }
 }

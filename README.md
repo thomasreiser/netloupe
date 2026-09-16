@@ -53,6 +53,7 @@ see `Config` in `src/config.rs` for every field and its default).
 | `e`                          | Toggle evidence details (Hosting pane)                |
 | `a`                          | Open the alternative-hostname picker (Overview)       |
 | `w`                          | Walk an NSEC-signed zone for its full name list (DNS) |
+| `s`                          | Open the settings editor              |
 | `y`                          | Copy the current pane as text                         |
 | `?`                          | Help overlay                                          |
 | `q`                          | Quit                                                  |
