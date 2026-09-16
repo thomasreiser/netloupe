@@ -22,15 +22,20 @@ const OVERVIEW_CHECKS: &[CheckId] = &[
     CheckId::Tls,
     CheckId::Mail,
     CheckId::Ping,
+    CheckId::AltNames,
 ];
 
 pub fn render(frame: &mut Frame, area: Rect, tab: &TabState) {
     let body = super::header_and_body(frame, area, tab, OVERVIEW_CHECKS);
 
+    let sections = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Percentage(62), Constraint::Min(5)])
+        .split(body);
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-        .split(body);
+        .split(sections[0]);
     let top = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Ratio(1, 3); 3])
@@ -39,6 +44,8 @@ pub fn render(frame: &mut Frame, area: Rect, tab: &TabState) {
         .direction(Direction::Horizontal)
         .constraints([Constraint::Ratio(1, 3); 3])
         .split(rows[1]);
+
+    render_alt_names(frame, sections[1], tab);
 
     card(frame, top[0], "TARGET", theme::CYAN, target_lines(tab));
     card(frame, top[1], "NETWORK", theme::BLUE, network_lines(tab));
@@ -304,4 +311,62 @@ fn latency_lines(tab: &TabState) -> Vec<Line<'static>> {
         lines.push(kv("Ping", "..."));
     }
     lines
+}
+
+fn render_alt_names(frame: &mut Frame, area: Rect, tab: &TabState) {
+    let title = "ALTERNATIVE HOSTNAMES";
+    let accent = theme::pane_accent(crate::app::Pane::Overview);
+
+    let Some(CheckUpdate::AltNames(alt)) = &tab.slot(CheckId::AltNames).update else {
+        let block = theme::panel(title, accent);
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+        frame.render_widget(
+            super::empty_message("looking for other names pointing at the same destination..."),
+            inner,
+        );
+        return;
+    };
+
+    if alt.names.is_empty() {
+        let block = theme::panel(title, accent);
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+        frame.render_widget(
+            super::empty_message(
+                "none found (PTR/certificate/CT-log/reverse-IP all came up empty)",
+            ),
+            inner,
+        );
+        return;
+    }
+
+    let block = theme::panel_with_hint(
+        title,
+        "press 'a' to open one in a new tab",
+        theme::MUTED,
+        accent,
+    );
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let max_rows = inner.height as usize;
+    let lines: Vec<Line> = alt
+        .names
+        .iter()
+        .take(max_rows)
+        .map(|n| {
+            let sources = n
+                .sources
+                .iter()
+                .map(|s| s.label())
+                .collect::<Vec<_>>()
+                .join(", ");
+            Line::from(vec![
+                Span::styled(format!("{:<32}", n.name), Style::default().fg(theme::TEXT)),
+                Span::styled(sources, Style::default().fg(theme::MUTED)),
+            ])
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(lines), inner);
 }

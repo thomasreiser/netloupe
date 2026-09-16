@@ -7,7 +7,7 @@ pub mod theme;
 pub mod widgets;
 
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap};
 use ratatui::Frame;
@@ -62,6 +62,9 @@ pub fn draw(frame: &mut Frame, state: &AppState) {
         Mode::NewHostPrompt(buf) => render_prompt(frame, area, buf),
         Mode::Help => render_help(frame, area),
         Mode::ConfirmPorts => render_confirm_ports(frame, area),
+        Mode::SelectAltName { names, selected } => {
+            render_select_alt_name(frame, area, names, *selected)
+        }
         Mode::Normal => {}
     }
 }
@@ -99,6 +102,9 @@ fn render_status_line(frame: &mut Frame, area: Rect, state: &AppState) {
         sep(),
         key("e"),
         desc(" evidence "),
+        sep(),
+        key("a"),
+        desc(" alt. hosts "),
         sep(),
         key("q"),
         desc(" quit"),
@@ -194,6 +200,50 @@ fn render_confirm_ports(frame: &mut Frame, area: Rect) {
     frame.render_widget(text, inner);
 }
 
+fn render_select_alt_name(
+    frame: &mut Frame,
+    area: Rect,
+    names: &[crate::checks::altnames::AltName],
+    selected: usize,
+) {
+    let popup = centered_rect(64, 60, area);
+    frame.render_widget(Clear, popup);
+    let block = theme::panel_with_hint(
+        "Open alternative host",
+        "↑/↓ select · enter open · esc cancel",
+        theme::MUTED,
+        theme::pane_accent(crate::app::Pane::Overview),
+    );
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    let items: Vec<ratatui::widgets::ListItem> = names
+        .iter()
+        .map(|n| {
+            let sources = n
+                .sources
+                .iter()
+                .map(|s| s.label())
+                .collect::<Vec<_>>()
+                .join(", ");
+            ratatui::widgets::ListItem::new(Line::from(vec![
+                Span::styled(n.name.clone(), Style::default().fg(theme::TEXT)),
+                Span::styled(format!("  ({sources})"), Style::default().fg(theme::MUTED)),
+            ]))
+        })
+        .collect();
+    let list = ratatui::widgets::List::new(items)
+        .highlight_style(
+            Style::default()
+                .fg(Color::Rgb(18, 18, 24))
+                .bg(theme::CYAN)
+                .add_modifier(Modifier::BOLD),
+        )
+        .highlight_symbol("❯ ");
+    let mut state = ratatui::widgets::ListState::default().with_selected(Some(selected));
+    frame.render_stateful_widget(list, inner, &mut state);
+}
+
 fn render_help(frame: &mut Frame, area: Rect) {
     let popup = centered_rect(56, 60, area);
     frame.render_widget(Clear, popup);
@@ -219,6 +269,7 @@ fn render_help(frame: &mut Frame, area: Rect) {
         row("r", "Re-run checks for the current pane"),
         row("R", "Re-run all checks for the current host"),
         row("e", "Toggle evidence details (Hosting pane)"),
+        row("a", "Open the alternative-hostname picker (Overview)"),
         row("y", "Copy the current pane as text"),
         row("?", "Help overlay"),
         row("q", "Quit"),
@@ -239,6 +290,7 @@ mod tests {
     use super::*;
     use crate::app::{CheckSlot, CheckStatus, Mode, Pane, TabState};
     use crate::checks::acme::{AcmeInfo, CertificateAuthority, ChallengeHint, Dns01Evidence};
+    use crate::checks::altnames::{AltName, NameSource};
     use crate::checks::ping::{PingMethod, PingSample, PingUpdate};
     use crate::checks::{CheckId, SharedResultsHandle};
     use crate::config::Config;
@@ -369,6 +421,28 @@ mod tests {
             },
         );
 
+        let alt = crate::checks::altnames::AltNamesResult {
+            ips: vec!["93.184.216.34".parse().unwrap()],
+            names: vec![
+                AltName {
+                    name: "www.example.com".into(),
+                    sources: vec![NameSource::TlsSan, NameSource::CertificateTransparency],
+                },
+                AltName {
+                    name: "example.net".into(),
+                    sources: vec![NameSource::ReverseIp],
+                },
+            ],
+            errors: Vec::new(),
+        };
+        tab.checks.insert(
+            CheckId::AltNames,
+            CheckSlot {
+                status: CheckStatus::Done,
+                update: Some(CheckUpdate::AltNames(alt)),
+            },
+        );
+
         tab
     }
 
@@ -442,6 +516,19 @@ mod tests {
             Mode::NewHostPrompt("exa".to_string()),
             Mode::Help,
             Mode::ConfirmPorts,
+            Mode::SelectAltName {
+                names: vec![
+                    AltName {
+                        name: "www.example.com".into(),
+                        sources: vec![NameSource::TlsSan],
+                    },
+                    AltName {
+                        name: "example.net".into(),
+                        sources: vec![NameSource::ReverseIp, NameSource::Ptr],
+                    },
+                ],
+                selected: 1,
+            },
         ] {
             state.mode = mode;
             render_at(100, 30, |frame| draw(frame, &state));

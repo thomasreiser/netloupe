@@ -126,30 +126,30 @@ async fn resolve_ip(ip: IpAddr, timeout: Duration) -> DnsResult {
         ..Default::default()
     };
 
-    let resolver = match system_resolver(timeout) {
-        Ok(r) => r,
-        Err(err) => {
-            result
-                .errors
-                .push(format!("could not set up the system resolver: {err}"));
-            return result;
-        }
-    };
-
-    match resolver.reverse_lookup(ip).await {
-        Ok(lookup) => {
-            result.ptr = lookup
-                .answers()
-                .iter()
-                .filter_map(|r| match &r.data {
-                    RData::PTR(ptr) => Some(ptr.0.to_string()),
-                    _ => None,
-                })
-                .collect();
-        }
+    match lookup_ptr(ip, timeout).await {
+        Ok(names) => result.ptr = names,
         Err(err) => result.errors.push(format!("PTR: {err}")),
     }
     result
+}
+
+/// Looks up PTR (reverse-DNS) records for an arbitrary IP, for checks
+/// (alternative-hostname discovery) that need a one-off PTR query outside
+/// the main `DnsResult`.
+pub async fn lookup_ptr(ip: IpAddr, timeout: Duration) -> Result<Vec<String>, String> {
+    let resolver = system_resolver(timeout)?;
+    match resolver.reverse_lookup(ip).await {
+        Ok(lookup) => Ok(lookup
+            .answers()
+            .iter()
+            .filter_map(|r| match &r.data {
+                RData::PTR(ptr) => Some(ptr.0.to_string()),
+                _ => None,
+            })
+            .collect()),
+        Err(err) if err.to_string().to_lowercase().contains("no record") => Ok(Vec::new()),
+        Err(err) => Err(err.to_string()),
+    }
 }
 
 /// Runs the A/AAAA/MX/NS/TXT/SOA/CAA lookups a hostname target needs,

@@ -78,6 +78,7 @@ impl Pane {
                 CheckId::Tls,
                 CheckId::Mail,
                 CheckId::Ping,
+                CheckId::AltNames,
             ],
             Pane::Dns => &[CheckId::Dns],
             Pane::Mail => &[CheckId::Mail],
@@ -146,6 +147,12 @@ pub enum Mode {
     Help,
     /// Asking whether to run the opt-in port scan for the active tab.
     ConfirmPorts,
+    /// Browsing the active tab's discovered alternative hostnames
+    /// (`CheckId::AltNames`); Enter opens a new tab for the selected one.
+    SelectAltName {
+        names: Vec<crate::checks::altnames::AltName>,
+        selected: usize,
+    },
 }
 
 pub struct AppState {
@@ -380,6 +387,24 @@ impl AppState {
                 self.mode = Mode::Normal;
                 self.confirm_ports(false, sender);
             }
+            (Mode::SelectAltName { selected, .. }, Action::SelectUp) => {
+                *selected = selected.saturating_sub(1);
+            }
+            (Mode::SelectAltName { names, selected }, Action::SelectDown) => {
+                if *selected + 1 < names.len() {
+                    *selected += 1;
+                }
+            }
+            (Mode::SelectAltName { names, selected }, Action::InputSubmit) => {
+                if let Some(target) = names
+                    .get(*selected)
+                    .and_then(|n| Target::parse(&n.name).ok())
+                {
+                    self.mode = Mode::Normal;
+                    self.open_tab(target, sender);
+                }
+            }
+            (Mode::SelectAltName { .. }, Action::InputCancel) => self.mode = Mode::Normal,
             (Mode::Normal, action) => self.handle_normal_action(action, sender),
             _ => {}
         }
@@ -434,9 +459,27 @@ impl AppState {
                 }
             }
             Action::ToggleHelp => self.mode = Mode::Help,
+            Action::OpenAltNames => self.open_alt_names_picker(),
             Action::CopyPane => {} // clipboard support is a later addition; no-op for now.
             _ => {}
         }
+    }
+
+    /// Opens the alternative-hostname picker for the active tab, if it has
+    /// found anything to pick from yet. A no-op otherwise (rather than an
+    /// empty popup), since there's nothing useful to select.
+    fn open_alt_names_picker(&mut self) {
+        let Some(tab) = self.active() else { return };
+        let Some(CheckUpdate::AltNames(alt)) = &tab.slot(CheckId::AltNames).update else {
+            return;
+        };
+        if alt.names.is_empty() {
+            return;
+        }
+        self.mode = Mode::SelectAltName {
+            names: alt.names.clone(),
+            selected: 0,
+        };
     }
 
     fn current_pane(&self) -> Option<Pane> {
@@ -483,6 +526,13 @@ fn decode_key(mode: &Mode, key: crossterm::event::KeyEvent) -> Action {
             KeyCode::Esc | KeyCode::Char('q') => Action::InputCancel,
             _ => Action::None,
         },
+        Mode::SelectAltName { .. } => match key.code {
+            KeyCode::Up | KeyCode::Char('k') => Action::SelectUp,
+            KeyCode::Down | KeyCode::Char('j') => Action::SelectDown,
+            KeyCode::Enter => Action::InputSubmit,
+            KeyCode::Esc | KeyCode::Char('q') => Action::InputCancel,
+            _ => Action::None,
+        },
         Mode::Normal => decode_normal_key(key),
     }
 }
@@ -518,6 +568,7 @@ fn decode_normal_key(key: crossterm::event::KeyEvent) -> Action {
         KeyCode::Char('r') => Action::RerunPane,
         KeyCode::Char('R') => Action::RerunAll,
         KeyCode::Char('e') => Action::ToggleEvidence,
+        KeyCode::Char('a') => Action::OpenAltNames,
         KeyCode::Char('y') => Action::CopyPane,
         KeyCode::Char('?') => Action::ToggleHelp,
         KeyCode::Char('q') => Action::Quit,
@@ -582,4 +633,167 @@ pub async fn run(
         tab.cancel.cancel();
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::checks::altnames::{AltName, AltNamesResult, NameSource};
+
+    fn test_sender() -> mpsc::Sender<CheckEvent> {
+        mpsc::channel(16).0
+    }
+
+    /// A private-IP target so `open_tab`'s spawned checks have nothing
+    /// real to reach — these tests exercise selection/mode logic, not the
+    /// checks themselves.
+    fn local_target() -> Target {
+        Target::parse("192.168.1.1").unwrap()
+    }
+
+    fn with_alt_names(state: &mut AppState, names: Vec<AltName>) {
+        state.tabs[0].checks.insert(
+            CheckId::AltNames,
+            CheckSlot {
+                status: CheckStatus::Done,
+                update: Some(CheckUpdate::AltNames(AltNamesResult {
+                    ips: Vec::new(),
+                    names,
+                    errors: Vec::new(),
+                })),
+            },
+        );
+    }
+
+    #[tokio::test]
+    async fn opening_the_picker_without_discovered_names_is_a_no_op() {
+        let mut state = AppState::new(Config::default(), ProviderDb::default());
+        let tx = test_sender();
+        state.open_tab(local_target(), &tx);
+
+        state.handle_action(Action::OpenAltNames, &tx);
+
+        assert!(matches!(state.mode, Mode::Normal));
+    }
+
+    #[tokio::test]
+    async fn opening_the_picker_with_discovered_names_enters_select_mode() {
+        let mut state = AppState::new(Config::default(), ProviderDb::default());
+        let tx = test_sender();
+        state.open_tab(local_target(), &tx);
+        with_alt_names(
+            &mut state,
+            vec![AltName {
+                name: "www.example.com".into(),
+                sources: vec![NameSource::TlsSan],
+            }],
+        );
+
+        state.handle_action(Action::OpenAltNames, &tx);
+
+        assert!(matches!(state.mode, Mode::SelectAltName { .. }));
+    }
+
+    #[tokio::test]
+    async fn selecting_and_confirming_opens_a_new_tab_for_that_name() {
+        let mut state = AppState::new(Config::default(), ProviderDb::default());
+        let tx = test_sender();
+        state.open_tab(local_target(), &tx);
+        with_alt_names(
+            &mut state,
+            vec![
+                AltName {
+                    name: "www.example.com".into(),
+                    sources: vec![NameSource::TlsSan],
+                },
+                AltName {
+                    name: "example.net".into(),
+                    sources: vec![NameSource::ReverseIp],
+                },
+            ],
+        );
+
+        state.handle_action(Action::OpenAltNames, &tx);
+        state.handle_action(Action::SelectDown, &tx);
+        state.handle_action(Action::InputSubmit, &tx);
+
+        assert!(matches!(state.mode, Mode::Normal));
+        assert_eq!(state.tabs.len(), 2);
+        assert_eq!(state.tabs[1].target.display(), "example.net");
+        // The new tab becomes active, matching every other "open a tab" path.
+        assert_eq!(state.active_tab, 1);
+    }
+
+    #[tokio::test]
+    async fn select_up_does_not_go_below_the_first_item() {
+        let mut state = AppState::new(Config::default(), ProviderDb::default());
+        let tx = test_sender();
+        state.open_tab(local_target(), &tx);
+        with_alt_names(
+            &mut state,
+            vec![AltName {
+                name: "www.example.com".into(),
+                sources: vec![NameSource::TlsSan],
+            }],
+        );
+        state.handle_action(Action::OpenAltNames, &tx);
+
+        state.handle_action(Action::SelectUp, &tx);
+        state.handle_action(Action::SelectUp, &tx);
+
+        let Mode::SelectAltName { selected, .. } = &state.mode else {
+            panic!("expected SelectAltName mode")
+        };
+        assert_eq!(*selected, 0);
+    }
+
+    #[tokio::test]
+    async fn select_down_does_not_go_past_the_last_item() {
+        let mut state = AppState::new(Config::default(), ProviderDb::default());
+        let tx = test_sender();
+        state.open_tab(local_target(), &tx);
+        with_alt_names(
+            &mut state,
+            vec![
+                AltName {
+                    name: "a.example.com".into(),
+                    sources: vec![NameSource::TlsSan],
+                },
+                AltName {
+                    name: "b.example.com".into(),
+                    sources: vec![NameSource::TlsSan],
+                },
+            ],
+        );
+        state.handle_action(Action::OpenAltNames, &tx);
+
+        for _ in 0..5 {
+            state.handle_action(Action::SelectDown, &tx);
+        }
+
+        let Mode::SelectAltName { selected, .. } = &state.mode else {
+            panic!("expected SelectAltName mode")
+        };
+        assert_eq!(*selected, 1);
+    }
+
+    #[tokio::test]
+    async fn cancel_returns_to_normal_without_opening_a_tab() {
+        let mut state = AppState::new(Config::default(), ProviderDb::default());
+        let tx = test_sender();
+        state.open_tab(local_target(), &tx);
+        with_alt_names(
+            &mut state,
+            vec![AltName {
+                name: "www.example.com".into(),
+                sources: vec![NameSource::TlsSan],
+            }],
+        );
+        state.handle_action(Action::OpenAltNames, &tx);
+
+        state.handle_action(Action::InputCancel, &tx);
+
+        assert!(matches!(state.mode, Mode::Normal));
+        assert_eq!(state.tabs.len(), 1);
+    }
 }

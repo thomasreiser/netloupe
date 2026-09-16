@@ -25,6 +25,12 @@ pub enum Action {
     CopyPane,
     ToggleHelp,
     Quit,
+    /// Opens the alternative-hostname picker for the active tab.
+    OpenAltNames,
+    /// Moves the picker's selection up/down (also usable by any future
+    /// selectable-list mode).
+    SelectUp,
+    SelectDown,
     /// Raw text typed into the "new host" prompt.
     InputChar(char),
     InputBackspace,
@@ -73,6 +79,7 @@ pub enum CheckUpdate {
     Reputation(crate::checks::reputation::ReputationResult),
     Trace(crate::checks::trace::TraceUpdate),
     Ports(crate::checks::ports::PortsUpdate),
+    AltNames(crate::checks::altnames::AltNamesResult),
     /// A pane that hasn't been wired up to a real check yet.
     NotImplemented,
 }

@@ -8,6 +8,7 @@
 //! every `run` body should prefer returning an error to unwrapping.
 
 pub mod acme;
+pub mod altnames;
 pub mod dns;
 pub mod geo;
 pub mod hosting;
@@ -45,11 +46,14 @@ pub enum CheckId {
     Hosting,
     Geo,
     Reputation,
+    /// Alternative-hostname discovery (PTR/cert-SAN/CT-log/reverse-IP);
+    /// feeds the Overview pane's summary, not a pane of its own.
+    AltNames,
 }
 
 impl CheckId {
     /// Every check, in the pane display order from `CLAUDE.md`.
-    pub const ALL: [CheckId; 11] = [
+    pub const ALL: [CheckId; 12] = [
         CheckId::Dns,
         CheckId::Mail,
         CheckId::Ping,
@@ -61,6 +65,7 @@ impl CheckId {
         CheckId::Hosting,
         CheckId::Geo,
         CheckId::Reputation,
+        CheckId::AltNames,
     ];
 
     pub fn label(self) -> &'static str {
@@ -76,6 +81,7 @@ impl CheckId {
             CheckId::Hosting => "Hosting",
             CheckId::Geo => "Geo",
             CheckId::Reputation => "Rep",
+            CheckId::AltNames => "Alt. names",
         }
     }
 
@@ -373,6 +379,18 @@ impl Check for ReputationCheck {
     }
 }
 
+struct AltNamesCheck;
+
+#[async_trait]
+impl Check for AltNamesCheck {
+    fn id(&self) -> CheckId {
+        CheckId::AltNames
+    }
+    async fn run(&self, ctx: CheckContext, tx: mpsc::Sender<CheckEvent>) {
+        altnames::run(ctx, tx).await
+    }
+}
+
 /// Every check netloupe knows about. `app.rs` spawns one from this list per
 /// tab for every check that isn't [`CheckId::requires_opt_in`]; opt-in
 /// checks are spawned only after the user confirms.
@@ -389,5 +407,6 @@ pub fn registry() -> Vec<Box<dyn Check>> {
         Box::new(HostingCheck),
         Box::new(GeoCheck),
         Box::new(ReputationCheck),
+        Box::new(AltNamesCheck),
     ]
 }
