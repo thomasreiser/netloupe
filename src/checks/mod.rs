@@ -181,6 +181,13 @@ pub struct CheckContext {
     pub cancel: CancellationToken,
     pub shared: SharedResultsHandle,
     pub providers: Arc<ProviderDb>,
+    /// The per-tab custom DNS server, if the user picked one when opening
+    /// this tab (see `app.rs`'s `Mode::ChooseResolver`) rather than
+    /// accepting the system's configured resolver. Every check that does
+    /// its own DNS resolution reads this and threads it into
+    /// `checks::dns::DnsOpts`, so switching a tab's resolver changes
+    /// where *every* lookup for that host goes, not just the DNS pane's.
+    pub resolver: Option<std::net::IpAddr>,
 }
 
 /// One check implementation. Kept as a trait (rather than a bare async fn)
@@ -213,7 +220,8 @@ pub(crate) async fn resolve_target_ip(ctx: &CheckContext) -> Result<std::net::Ip
                     return Ok(IpAddr::V6(ip));
                 }
             }
-            let addrs = dns::resolve_addrs(ascii, ctx.config.timeouts.dns).await?;
+            let opts = dns::DnsOpts::new(ctx.config.timeouts.dns, ctx.resolver);
+            let addrs = dns::resolve_addrs(ascii, opts).await?;
             // Prefer IPv4, matching the shared-cache branch above, so which
             // check happens to run first doesn't change which address
             // family the rest of the tab ends up probing.

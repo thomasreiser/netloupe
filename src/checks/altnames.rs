@@ -142,7 +142,8 @@ async fn gather(ctx: &CheckContext) -> AltNamesResult {
         }
     } else {
         for &ip in &ips {
-            match crate::checks::dns::lookup_ptr(ip, ctx.config.timeouts.dns).await {
+            let opts = crate::checks::dns::DnsOpts::new(ctx.config.timeouts.dns, ctx.resolver);
+            match crate::checks::dns::lookup_ptr(ip, opts).await {
                 Ok(names) => {
                     for name in names {
                         insert(&mut found, &name, NameSource::Ptr);

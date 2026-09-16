@@ -66,6 +66,9 @@ pub fn draw(frame: &mut Frame, state: &AppState) {
         Mode::SelectAltName { names, selected } => {
             render_select_alt_name(frame, area, names, *selected)
         }
+        Mode::ChooseResolver { target, input } => {
+            render_choose_resolver(frame, area, target, input)
+        }
         Mode::Normal => {}
     }
 }
@@ -163,6 +166,57 @@ fn render_prompt(frame: &mut Frame, area: Rect, buf: &str) {
         Span::styled("▏", Style::default().fg(theme::CYAN)),
     ]));
     frame.render_widget(text, inner);
+}
+
+fn render_choose_resolver(
+    frame: &mut Frame,
+    area: Rect,
+    target: &crate::target::Target,
+    input: &str,
+) {
+    let popup = centered_rect(64, 20, area);
+    frame.render_widget(Clear, popup);
+    let block = theme::panel_with_hint(
+        "DNS server",
+        "enter to confirm · esc to cancel",
+        theme::MUTED,
+        theme::CYAN,
+    );
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(2), Constraint::Length(1)])
+        .split(inner);
+
+    let prompt = Paragraph::new(vec![
+        Line::from(vec![
+            Span::styled("Query ", Style::default().fg(theme::MUTED)),
+            Span::styled(
+                target.display(),
+                Style::default()
+                    .fg(theme::TEXT)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                " using which DNS server?",
+                Style::default().fg(theme::MUTED),
+            ),
+        ]),
+        Line::from(Span::styled(
+            "blank = system default",
+            Style::default().fg(theme::FAINT),
+        )),
+    ]);
+    frame.render_widget(prompt, chunks[0]);
+
+    let text = Paragraph::new(Line::from(vec![
+        Span::styled("❯ ", Style::default().fg(theme::CYAN)),
+        Span::styled(input, Style::default().fg(theme::TEXT)),
+        Span::styled("▏", Style::default().fg(theme::CYAN)),
+    ]));
+    frame.render_widget(text, chunks[1]);
 }
 
 fn render_confirm_ports(frame: &mut Frame, area: Rect) {
@@ -367,6 +421,7 @@ mod tests {
             ports_confirmed: None,
             zone_walk_confirmed: None,
             scroll: 0,
+            resolver: None,
         }
     }
 

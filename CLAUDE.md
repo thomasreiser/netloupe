@@ -236,6 +236,7 @@ tests/
 cargo build                           # debug build
 cargo run -- example.com 8.8.8.8      # open with two tabs
 cargo run -- check example.com --json # headless run
+cargo run -- check example.com --resolver 1.1.1.1 --json # headless run against a specific DNS server
 cargo run -- update-data              # refresh provider range lists into the cache
 cargo xtask update-data               # regenerate the bundled snapshot in data/snapshot/
 cargo xtask lint-signatures           # validate all data/providers/*.toml
@@ -288,6 +289,7 @@ Before finishing any task, run `cargo fmt`, `cargo clippy` (with no warnings), a
 
 Config lives at `$XDG_CONFIG_HOME/netloupe/config.toml`. Every option has a sensible default so the tool runs with no config file at all. It covers:
 - resolvers to use (the system resolver by default, plus a comparison set: 1.1.1.1, 8.8.8.8, 9.9.9.9)
+- **Per-tab custom DNS server.** Opening a new host (`Ctrl+t`, or selecting an alternative hostname) always asks which DNS server to query, pre-filled with the last one chosen this session so repeating it is just Enter; blank means the system's normal resolver. Every check that resolves names for that tab (not just the DNS pane) queries that server, threaded through `checks::dns::DnsOpts`. `check <target> --resolver <ip>` is the headless equivalent.
 - timeouts per check type
 - the port list for scans
 - paths to the GeoLite2 `.mmdb` files

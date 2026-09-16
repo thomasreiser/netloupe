@@ -110,7 +110,15 @@ pub(crate) async fn run(ctx: CheckContext, tx: mpsc::Sender<CheckEvent>) {
             port,
             ..Default::default()
         };
-        connect_and_inspect(ip, &host.0, port, &ctx.config.timeouts, &mut result).await;
+        connect_and_inspect(
+            ip,
+            &host.0,
+            port,
+            &ctx.config.timeouts,
+            ctx.resolver,
+            &mut result,
+        )
+        .await;
 
         ctx.shared.set_tls(result.clone()).await;
         Ok(CheckUpdate::Tls(result))
@@ -123,6 +131,7 @@ async fn connect_and_inspect(
     sni: &str,
     port: u16,
     timeouts: &crate::config::TimeoutConfig,
+    resolver: Option<IpAddr>,
     result: &mut TlsResult,
 ) {
     let config = client_config();
@@ -189,8 +198,15 @@ async fn connect_and_inspect(
 
     if let Some(issuer) = result.issuer.clone() {
         let domain = super::acme::domain_for_target(sni);
-        result.acme =
-            super::acme::inspect(domain, &result.sans, &issuer, timeouts.dns, timeouts.http).await;
+        result.acme = super::acme::inspect(
+            domain,
+            &result.sans,
+            &issuer,
+            timeouts.dns,
+            timeouts.http,
+            resolver,
+        )
+        .await;
     }
 }
 

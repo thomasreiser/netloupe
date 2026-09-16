@@ -218,6 +218,7 @@ pub async fn inspect(
     issuer: &str,
     dns_timeout: Duration,
     http_timeout: Duration,
+    resolver: Option<IpAddr>,
 ) -> Option<AcmeInfo> {
     let authority = classify_issuer(issuer);
     let kind = authority.kind()?;
@@ -245,7 +246,7 @@ pub async fn inspect(
             // A wildcard's own label doesn't carry a TXT record; the
             // challenge for `*.example.com` is proven at `example.com`.
             let base = domain.strip_prefix("*.").unwrap_or(domain);
-            info.dns01 = Some(probe_dns01(base, dns_timeout).await);
+            info.dns01 = Some(probe_dns01(base, dns_timeout, resolver).await);
             if challenge_hint != ChallengeHint::Dns01Certain {
                 info.http01 = Some(probe_http01(base, http_timeout).await);
             }
@@ -255,12 +256,17 @@ pub async fn inspect(
     Some(info)
 }
 
-async fn probe_dns01(base_domain: &str, timeout: Duration) -> Dns01Evidence {
+async fn probe_dns01(
+    base_domain: &str,
+    timeout: Duration,
+    resolver: Option<IpAddr>,
+) -> Dns01Evidence {
     let name = format!("_acme-challenge.{base_domain}");
-    let txt_values = crate::checks::dns::lookup_txt(&name, timeout)
+    let opts = crate::checks::dns::DnsOpts::new(timeout, resolver);
+    let txt_values = crate::checks::dns::lookup_txt(&name, opts)
         .await
         .unwrap_or_default();
-    let cname_target = crate::checks::dns::lookup_cname(&name, timeout)
+    let cname_target = crate::checks::dns::lookup_cname(&name, opts)
         .await
         .ok()
         .flatten();
@@ -390,6 +396,7 @@ mod tests {
             "C=US, O=DigiCert Inc, CN=DigiCert TLS RSA SHA256 2020 CA1",
             Duration::from_millis(1),
             Duration::from_millis(1),
+            None,
         )
         .await;
         assert!(info.is_none());
@@ -406,6 +413,7 @@ mod tests {
             "C=US, O=Let's Encrypt, CN=R3",
             Duration::from_millis(1),
             Duration::from_millis(1),
+            None,
         )
         .await
         .unwrap();
@@ -429,6 +437,7 @@ mod tests {
             "C=US, O=Let's Encrypt, CN=R3",
             Duration::from_millis(1),
             Duration::from_millis(1),
+            None,
         )
         .await
         .unwrap();
@@ -449,6 +458,7 @@ mod tests {
                 issuer,
                 Duration::from_millis(1),
                 Duration::from_millis(1),
+                None,
             )
             .await
             .unwrap();
@@ -475,6 +485,7 @@ mod tests {
                 "C=US, O=Google Trust Services, CN=WE1",
                 Duration::from_millis(1),
                 Duration::from_millis(1),
+                None,
             )
             .await
             .unwrap();

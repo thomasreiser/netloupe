@@ -42,6 +42,10 @@ enum Command {
         json: bool,
         #[arg(long)]
         port: Option<u16>,
+        /// Query this DNS server instead of the system's configured
+        /// resolver, for every check that resolves names.
+        #[arg(long)]
+        resolver: Option<std::net::IpAddr>,
     },
     /// Refreshes the cached provider range lists used for hosting detection.
     UpdateData {
@@ -63,7 +67,12 @@ fn main() -> anyhow::Result<()> {
 async fn async_main(cli: Cli) -> anyhow::Result<()> {
     match cli.command {
         Some(Command::UpdateData { provider }) => run_update_data(provider).await,
-        Some(Command::Check { target, json, port }) => run_check(target, port, json).await,
+        Some(Command::Check {
+            target,
+            json,
+            port,
+            resolver,
+        }) => run_check(target, port, resolver, json).await,
         None => run_tui(cli.hosts).await,
     }
 }
@@ -123,10 +132,15 @@ fn load_config_and_providers() -> anyhow::Result<(Config, ProviderDb)> {
     Ok((config, providers))
 }
 
-async fn run_check(target: String, port: Option<u16>, json: bool) -> anyhow::Result<()> {
+async fn run_check(
+    target: String,
+    port: Option<u16>,
+    resolver: Option<std::net::IpAddr>,
+    json: bool,
+) -> anyhow::Result<()> {
     let (config, providers) = load_config_and_providers()?;
     let target = Target::parse(&target).map_err(|e| anyhow::anyhow!(e))?;
-    let slots = run_headless(target.clone(), port, config, providers).await;
+    let slots = run_headless(target.clone(), port, resolver, config, providers).await;
 
     if json {
         println!(
@@ -145,6 +159,7 @@ async fn run_check(target: String, port: Option<u16>, json: bool) -> anyhow::Res
 async fn run_headless(
     target: Target,
     port: Option<u16>,
+    resolver: Option<std::net::IpAddr>,
     config: Config,
     providers: ProviderDb,
 ) -> BTreeMap<CheckId, CheckSlot> {
@@ -175,6 +190,7 @@ async fn run_headless(
             cancel: cancel.clone(),
             shared: shared.clone(),
             providers: providers.clone(),
+            resolver,
         };
         let tx = tx.clone();
         tokio::spawn(async move { check.run(ctx, tx).await });
@@ -335,6 +351,7 @@ fn update_json(update: &CheckUpdate) -> serde_json::Value {
 
     match update {
         CheckUpdate::Dns(d) => json!({
+            "resolver": d.resolver,
             "a": d.a.iter().map(ToString::to_string).collect::<Vec<_>>(),
             "aaaa": d.aaaa.iter().map(ToString::to_string).collect::<Vec<_>>(),
             "cnames": d.cnames,
