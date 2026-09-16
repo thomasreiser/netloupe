@@ -70,15 +70,17 @@ pub fn render(frame: &mut Frame, area: Rect, tab: &TabState, geoip: &GeoipStatus
     }
 
     // A map only means anything once there's a coordinate to zoom to --
-    // otherwise this is exactly the old single-column layout.
+    // otherwise this is exactly the old full-height layout. Full width,
+    // bottom half of the pane, so the map gets enough room to actually
+    // show a recognizable area rather than a narrow sliver.
     let table_area = match (geo.lat, geo.lon) {
         (Some(lat), Some(lon)) => {
-            let columns = Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints([Constraint::Length(34), Constraint::Min(20)])
+            let rows = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
                 .split(body);
-            render_map(frame, columns[1], lat, lon);
-            columns[0]
+            render_map(frame, rows[1], lat, lon);
+            rows[0]
         }
         _ => body,
     };
