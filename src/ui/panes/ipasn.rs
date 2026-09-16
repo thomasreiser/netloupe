@@ -63,7 +63,10 @@ pub fn render(frame: &mut Frame, area: Rect, tab: &TabState) {
     ];
 
     if is_global {
-        rows.push(("RPKI".to_string(), "not implemented yet".to_string()));
+        match &info.rpki {
+            Some(state) => rows.push(("RPKI".to_string(), state.label().to_string())),
+            None => rows.push(("RPKI".to_string(), "unknown".to_string())),
+        }
 
         match &info.asn {
             Some(asn) => {

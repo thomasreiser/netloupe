@@ -1,8 +1,6 @@
-//! IP/ASN pane: origin ASN (via Team Cymru's DNS whois), RDAP ownership
-//! info, and IP address classification.
-//!
-//! RPKI route-origin validation isn't implemented yet (see the roadmap in
-//! `CLAUDE.md`); `rpki` is always `Unknown` for now rather than a guess.
+//! IP/ASN pane: origin ASN (via Team Cymru's DNS whois), RPKI
+//! route-origin validation, RDAP ownership info, and IP address
+//! classification.
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::time::Duration;
@@ -74,6 +72,39 @@ pub struct AsnInfo {
     pub as_name: Option<String>,
 }
 
+/// RPKI route-origin validation state for the announced prefix, per
+/// RFC 6811, as reported by RIPEstat's public `rpki-validation` data
+/// call -- which validates against global RPKI data (aggregated via
+/// routinator), not just RIPE NCC's own region.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RpkiState {
+    /// A covering ROA authorizes exactly this origin ASN and prefix
+    /// length.
+    Valid,
+    /// A covering ROA exists, but for a different origin ASN -- this
+    /// announcement doesn't match who's authorized to make it.
+    InvalidAsn,
+    /// A covering ROA exists for this ASN, but the announced prefix is
+    /// more specific than the ROA's max length allows.
+    InvalidLength,
+    /// No covering ROA at all -- neither validated nor contradicted;
+    /// this prefix simply isn't RPKI-protected.
+    NotFound,
+}
+
+impl RpkiState {
+    pub fn label(self) -> &'static str {
+        match self {
+            RpkiState::Valid => "valid",
+            RpkiState::InvalidAsn => "invalid — wrong origin AS for the covering ROA",
+            RpkiState::InvalidLength => {
+                "invalid — prefix more specific than the covering ROA allows"
+            }
+            RpkiState::NotFound => "no covering ROA (not RPKI-protected)",
+        }
+    }
+}
+
 /// A trimmed-down view of an RDAP response: enough to show who's
 /// responsible for an IP block without reproducing the whole document.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -90,6 +121,11 @@ pub struct IpInfoResult {
     pub ip: IpAddr,
     pub class: IpClass,
     pub asn: Option<AsnInfo>,
+    /// `None` when it was never looked up (no ASN to validate against
+    /// yet) or the lookup failed (see `errors`); distinct from
+    /// `Some(RpkiState::NotFound)`, which means the lookup succeeded and
+    /// found no covering ROA at all.
+    pub rpki: Option<RpkiState>,
     pub rdap: Option<RdapInfo>,
     pub errors: Vec<String>,
 }
@@ -106,6 +142,7 @@ pub(crate) async fn run(ctx: CheckContext, tx: mpsc::Sender<CheckEvent>) {
             ip,
             class: classify(ip),
             asn: None,
+            rpki: None,
             rdap: None,
             errors: Vec::new(),
         };
@@ -120,6 +157,16 @@ pub(crate) async fn run(ctx: CheckContext, tx: mpsc::Sender<CheckEvent>) {
             match lookup_asn(ip, opts).await {
                 Ok(asn) => result.asn = asn,
                 Err(err) => result.errors.push(format!("ASN lookup: {err}")),
+            }
+
+            // Needs the ASN lookup's prefix: RPKI validates "is this
+            // origin AS authorized to announce this prefix", not the bare
+            // IP alone.
+            if let Some(asn) = &result.asn {
+                match lookup_rpki(asn.asn, &asn.prefix, ctx.config.timeouts.rdap).await {
+                    Ok(state) => result.rpki = Some(state),
+                    Err(err) => result.errors.push(format!("RPKI: {err}")),
+                }
             }
 
             match lookup_rdap(ip, ctx.config.timeouts.rdap).await {
@@ -345,6 +392,52 @@ fn parse_rdap(body: &Value, registry_url: String) -> RdapInfo {
     }
 }
 
+/// Retried (see `crate::retry`): RIPEstat is netloupe's own helper
+/// request to a public aggregator, not the target itself.
+async fn lookup_rpki(asn: u32, prefix: &str, timeout: Duration) -> Result<RpkiState, String> {
+    let url = format!(
+        "https://stat.ripe.net/data/rpki-validation/data.json?resource={asn}&prefix={prefix}"
+    );
+    let client = reqwest::Client::builder()
+        .timeout(timeout)
+        .user_agent(concat!("netloupe/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    retry::run(&retry::Policy::default(), || async {
+        let response = client
+            .get(&url)
+            .send()
+            .await
+            .map_err(retry::classify_send_error)?;
+        if !response.status().is_success() {
+            return Err(retry::classify_status(response.status()));
+        }
+        let body: Value = response
+            .json()
+            .await
+            .map_err(|e| Failure::Retryable(e.to_string()))?;
+        parse_rpki_status(&body)
+            .ok_or_else(|| Failure::Fatal("unexpected response shape".to_string()))
+    })
+    .await
+}
+
+/// Reads `data.status` from a RIPEstat `rpki-validation` response.
+/// Anything other than the two "invalid" reasons or "valid" (including
+/// "unknown", or any status this hasn't seen before) means no covering
+/// ROA was found -- treated as [`RpkiState::NotFound`] rather than an
+/// error, since that's a perfectly normal, common outcome.
+fn parse_rpki_status(body: &Value) -> Option<RpkiState> {
+    let status = body.get("data")?.get("status")?.as_str()?;
+    Some(match status {
+        "valid" => RpkiState::Valid,
+        "invalid_asn" => RpkiState::InvalidAsn,
+        "invalid_length" => RpkiState::InvalidLength,
+        _ => RpkiState::NotFound,
+    })
+}
+
 /// Pulls an email address out of an RDAP entity's jCard (`vcardArray`).
 fn extract_vcard_email(entity: &Value) -> Option<String> {
     let vcard = entity.get("vcardArray")?.as_array()?;
@@ -403,6 +496,7 @@ mod tests {
 
         assert_eq!(info.class, IpClass::Private);
         assert!(info.asn.is_none());
+        assert!(info.rpki.is_none());
         assert!(info.rdap.is_none());
         assert!(
             info.errors.is_empty(),
@@ -544,5 +638,37 @@ mod tests {
         let rdap = parse_rdap(&body, "https://example.org".to_string());
         assert_eq!(rdap.handle.as_deref(), Some("X"));
         assert!(rdap.abuse_email.is_none());
+    }
+
+    #[test]
+    fn parses_rpki_validation_statuses() {
+        let case = |status: &str| -> Value {
+            serde_json::json!({"data": {"status": status, "validating_roas": []}})
+        };
+        assert_eq!(parse_rpki_status(&case("valid")), Some(RpkiState::Valid));
+        assert_eq!(
+            parse_rpki_status(&case("invalid_asn")),
+            Some(RpkiState::InvalidAsn)
+        );
+        assert_eq!(
+            parse_rpki_status(&case("invalid_length")),
+            Some(RpkiState::InvalidLength)
+        );
+        assert_eq!(
+            parse_rpki_status(&case("unknown")),
+            Some(RpkiState::NotFound)
+        );
+        // A status this has never seen before still degrades to
+        // "no covering ROA found" rather than failing the whole check.
+        assert_eq!(
+            parse_rpki_status(&case("some_future_status")),
+            Some(RpkiState::NotFound)
+        );
+    }
+
+    #[test]
+    fn parse_rpki_status_rejects_a_response_missing_the_data_field() {
+        let body: Value = serde_json::json!({"messages": []});
+        assert_eq!(parse_rpki_status(&body), None);
     }
 }
