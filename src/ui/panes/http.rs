@@ -1,4 +1,6 @@
-//! HTTP pane: status, redirect chain, timing, security headers.
+//! HTTP pane: status, redirect chain, timing, security headers, the
+//! negotiated HTTP version, and dedicated plain-HTTP-on-port-80/h2c/
+//! HTTP/3 reachability probes.
 
 use ratatui::layout::Rect;
 use ratatui::Frame;
@@ -39,10 +41,52 @@ pub fn render(frame: &mut Frame, area: Rect, tab: &TabState) {
         rows.push(("Final URL".to_string(), url.clone()));
     }
     if let Some(version) = &http.http_version {
-        rows.push(("Version".to_string(), version.clone()));
+        // A real ALPN negotiation, not just "the only protocol this
+        // build speaks" -- so HTTP/1.1 here means the server genuinely
+        // didn't offer HTTP/2, not that we didn't ask.
+        rows.push(("Negotiated".to_string(), version.clone()));
     }
+    rows.push((
+        "HTTP/3".to_string(),
+        if http.http3_supported {
+            "supported — a QUIC-only request to the same host/port succeeded".to_string()
+        } else {
+            "not offered (or the QUIC connection was blocked/unreachable)".to_string()
+        },
+    ));
     if let Some(timing) = http.timing {
         rows.push(("Timing".to_string(), format!("{}ms", timing.as_millis())));
+    }
+    if let Some(plain) = &http.plain_http {
+        let value = if plain.reachable {
+            let status = plain
+                .status
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "-".to_string());
+            if plain.redirects_to_https {
+                format!("yes — port {}, {status}, redirects to HTTPS", plain.port)
+            } else {
+                format!(
+                    "yes — port {}, {status}, served over plain HTTP",
+                    plain.port
+                )
+            }
+        } else {
+            format!(
+                "no — port {}: {}",
+                plain.port,
+                plain.error.as_deref().unwrap_or("unreachable")
+            )
+        };
+        rows.push(("HTTP (port 80)".to_string(), value));
+        rows.push((
+            "h2c".to_string(),
+            if plain.h2c_supported {
+                "supported — accepted HTTP/2 over cleartext via prior knowledge".to_string()
+            } else {
+                "not supported (or not offered without TLS)".to_string()
+            },
+        ));
     }
 
     let sec = &http.security_headers;
