@@ -32,7 +32,7 @@ Guidance for Claude Code when working in this repository.
 | 4 | Ping/Trace | ICMP + TCP ping with live sparkline, MTR-style traceroute with ASN/provider per hop |
 | 5 | Ports | Opt-in scan of a configurable port list, banners |
 | 6 | TLS | Full per-certificate detail for the whole chain (serial, fingerprints, public key, extensions, SCTs, ...), SANs, expiry, protocol/cipher, ACME issuance analysis |
-| 7 | HTTP | Status, redirect chain, timing breakdown, security headers, per-version support table (HTTP/1.1, HTTP/2 TLS, h2c, HTTP/3), plain-HTTP-on-port-80 reachability |
+| 7 | HTTP | Status, redirect chain, timing breakdown, security headers, per-version support table (HTTP/1.0, HTTP/1.1, HTTP/2 TLS, h2c, HTTP/3), plain-HTTP-on-port-80 reachability |
 | 8 | IP/ASN | ASN, prefix, RPKI state, RDAP (RIR, owner, abuse contact), IP class (private/CGNAT/bogon/anycast) |
 | 9 | Hosting | Detected cloud/CDN/hosting/DNS/mail providers, with layers and evidence (see below) |
 | 10 | Geo | Country/region/city, timezone, org, connection type, accuracy hint |

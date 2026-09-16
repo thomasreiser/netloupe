@@ -90,6 +90,7 @@ pub fn render(frame: &mut Frame, area: Rect, tab: &TabState) {
             "✗ not supported".to_string()
         }
     };
+    rows.push(("HTTP/1.0 (TLS)".to_string(), supported(v.http1_0_tls)));
     rows.push(("HTTP/1.1 (TLS)".to_string(), supported(v.http1_tls)));
     rows.push(("HTTP/2 (TLS)".to_string(), supported(v.http2_tls)));
     rows.push(("HTTP/2 (h2c)".to_string(), supported(v.h2c)));
