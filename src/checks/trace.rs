@@ -117,8 +117,9 @@ pub(crate) async fn run(ctx: CheckContext, tx: mpsc::Sender<CheckEvent>) {
             Some(
                 "no ICMP socket available (needs root, CAP_NET_RAW, or an unprivileged ICMP \
                  range); running a simple TCP-connect TTL sweep instead. That can tell how many \
-                 hops away the target is, but not which routers are in between — root or \
-                 CAP_NET_RAW would show the full hop-by-hop path."
+                 hops away the target is, but not which routers are in between — so the \
+                 Address and Provider columns stay empty for every hop but the last. Root or \
+                 CAP_NET_RAW would show the full hop-by-hop path, with provider badges."
                     .to_string(),
             ),
         )

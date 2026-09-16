@@ -244,6 +244,16 @@ fn render_hop_table(frame: &mut Frame, area: Rect, trace: &TraceUpdate) {
         })
         .collect();
 
+    // On the TCP-connect fallback there's no address (so no provider
+    // lookup) for any hop but the last -- labeling the column itself
+    // makes that obvious right where the empty cells are, rather than
+    // relying on the reader having also noticed the banner above.
+    let provider_header = if matches!(trace.method, TraceMethod::TcpConnect { .. }) {
+        "Provider (needs ICMP: root/CAP_NET_RAW)"
+    } else {
+        "Provider"
+    };
+
     let table = Table::new(
         rows,
         [
@@ -254,7 +264,7 @@ fn render_hop_table(frame: &mut Frame, area: Rect, trace: &TraceUpdate) {
         ],
     )
     .header(
-        Row::new(vec!["TTL", "Address", "RTT", "Provider"]).style(
+        Row::new(vec!["TTL", "Address", "RTT", provider_header]).style(
             Style::default()
                 .fg(theme::LABEL)
                 .add_modifier(Modifier::BOLD),
