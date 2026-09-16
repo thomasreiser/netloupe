@@ -93,37 +93,37 @@ pub(crate) async fn run(ctx: CheckContext, tx: mpsc::Sender<CheckEvent>) {
             Target::Host { ascii, .. } => ascii.clone(),
             Target::Ip(_) => return Err("Mail checks need a hostname, not a bare IP".to_string()),
         };
-        let timeout = ctx.config.timeouts.dns;
+        let opts = crate::checks::dns::DnsOpts::new(ctx.config.timeouts.dns, ctx.resolver);
 
         let mut result = MailResult {
             domain: domain.clone(),
             ..Default::default()
         };
 
-        match spf_lookup(&domain, timeout).await {
+        match spf_lookup(&domain, opts).await {
             Ok(spf) => result.spf = spf,
             Err(err) => result.errors.push(format!("SPF: {err}")),
         }
 
-        match dmarc_lookup(&domain, timeout).await {
+        match dmarc_lookup(&domain, opts).await {
             Ok(dmarc) => result.dmarc = dmarc,
             Err(err) => result.errors.push(format!("DMARC: {err}")),
         }
 
         for &selector in COMMON_DKIM_SELECTORS {
             let name = format!("{selector}._domainkey.{domain}");
-            if let Ok(txt) = crate::checks::dns::lookup_txt(&name, timeout).await {
+            if let Ok(txt) = crate::checks::dns::lookup_txt(&name, opts).await {
                 if txt.iter().any(|t| looks_like_dkim_key(t)) {
                     result.dkim_selectors_found.push(selector.to_string());
                 }
             }
         }
 
-        result.mta_sts_record = first_txt(&format!("_mta-sts.{domain}"), timeout).await;
-        result.tls_rpt_record = first_txt(&format!("_smtp._tls.{domain}"), timeout).await;
-        result.bimi_record = first_txt(&format!("default._bimi.{domain}"), timeout).await;
+        result.mta_sts_record = first_txt(&format!("_mta-sts.{domain}"), opts).await;
+        result.tls_rpt_record = first_txt(&format!("_smtp._tls.{domain}"), opts).await;
+        result.bimi_record = first_txt(&format!("default._bimi.{domain}"), opts).await;
 
-        if let Some(mx_host) = lowest_preference_mx(&domain, timeout).await {
+        if let Some(mx_host) = lowest_preference_mx(&domain, opts).await {
             result
                 .smtp
                 .push(probe_smtp(&mx_host, ctx.config.timeouts.tls).await);
@@ -143,15 +143,15 @@ fn looks_like_dkim_key(txt: &str) -> bool {
     parse_tag_list(txt).get("p").is_some_and(|p| p.len() > 8)
 }
 
-async fn first_txt(name: &str, timeout: Duration) -> Option<String> {
-    crate::checks::dns::lookup_txt(name, timeout)
+async fn first_txt(name: &str, opts: crate::checks::dns::DnsOpts) -> Option<String> {
+    crate::checks::dns::lookup_txt(name, opts)
         .await
         .ok()
         .and_then(|v| v.into_iter().next())
 }
 
-async fn lowest_preference_mx(domain: &str, timeout: Duration) -> Option<String> {
-    let mut records = crate::checks::dns::lookup_mx(domain, timeout).await.ok()?;
+async fn lowest_preference_mx(domain: &str, opts: crate::checks::dns::DnsOpts) -> Option<String> {
+    let mut records = crate::checks::dns::lookup_mx(domain, opts).await.ok()?;
     records.sort_by_key(|mx| mx.preference);
     records
         .into_iter()
@@ -159,13 +159,16 @@ async fn lowest_preference_mx(domain: &str, timeout: Duration) -> Option<String>
         .map(|mx| mx.exchange.trim_end_matches('.').to_string())
 }
 
-async fn spf_lookup(domain: &str, timeout: Duration) -> Result<Option<SpfResult>, String> {
-    let Some(record) = find_spf_record(domain, timeout).await? else {
+async fn spf_lookup(
+    domain: &str,
+    opts: crate::checks::dns::DnsOpts,
+) -> Result<Option<SpfResult>, String> {
+    let Some(record) = find_spf_record(domain, opts).await? else {
         return Ok(None);
     };
     let mut includes = Vec::new();
     let mut visited = std::collections::HashSet::new();
-    let lookup_count = flatten_spf(domain, &record, timeout, 0, &mut includes, &mut visited).await;
+    let lookup_count = flatten_spf(domain, &record, opts, 0, &mut includes, &mut visited).await;
     Ok(Some(SpfResult {
         record,
         includes,
@@ -174,8 +177,11 @@ async fn spf_lookup(domain: &str, timeout: Duration) -> Result<Option<SpfResult>
     }))
 }
 
-async fn find_spf_record(domain: &str, timeout: Duration) -> Result<Option<String>, String> {
-    let txt = crate::checks::dns::lookup_txt(domain, timeout).await?;
+async fn find_spf_record(
+    domain: &str,
+    opts: crate::checks::dns::DnsOpts,
+) -> Result<Option<String>, String> {
+    let txt = crate::checks::dns::lookup_txt(domain, opts).await?;
     Ok(txt.into_iter().find(|t| t.starts_with("v=spf1")))
 }
 
@@ -186,7 +192,7 @@ async fn find_spf_record(domain: &str, timeout: Duration) -> Result<Option<Strin
 fn flatten_spf<'a>(
     domain: &'a str,
     record: &'a str,
-    timeout: Duration,
+    opts: crate::checks::dns::DnsOpts,
     depth: u32,
     includes: &'a mut Vec<String>,
     visited: &'a mut std::collections::HashSet<String>,
@@ -202,15 +208,13 @@ fn flatten_spf<'a>(
             if let Some(target) = mechanism.strip_prefix("include:") {
                 count += 1;
                 includes.push(target.to_string());
-                if let Ok(Some(nested)) = find_spf_record(target, timeout).await {
-                    count +=
-                        flatten_spf(target, &nested, timeout, depth + 1, includes, visited).await;
+                if let Ok(Some(nested)) = find_spf_record(target, opts).await {
+                    count += flatten_spf(target, &nested, opts, depth + 1, includes, visited).await;
                 }
             } else if let Some(target) = mechanism.strip_prefix("redirect=") {
                 count += 1;
-                if let Ok(Some(nested)) = find_spf_record(target, timeout).await {
-                    count +=
-                        flatten_spf(target, &nested, timeout, depth + 1, includes, visited).await;
+                if let Ok(Some(nested)) = find_spf_record(target, opts).await {
+                    count += flatten_spf(target, &nested, opts, depth + 1, includes, visited).await;
                 }
             } else if mechanism.starts_with("a:")
                 || mechanism == "a"
@@ -228,9 +232,12 @@ fn flatten_spf<'a>(
     })
 }
 
-async fn dmarc_lookup(domain: &str, timeout: Duration) -> Result<Option<DmarcResult>, String> {
+async fn dmarc_lookup(
+    domain: &str,
+    opts: crate::checks::dns::DnsOpts,
+) -> Result<Option<DmarcResult>, String> {
     let name = format!("_dmarc.{domain}");
-    let txt = crate::checks::dns::lookup_txt(&name, timeout).await?;
+    let txt = crate::checks::dns::lookup_txt(&name, opts).await?;
     let Some(record) = txt.into_iter().find(|t| t.starts_with("v=DMARC1")) else {
         return Ok(None);
     };
@@ -327,7 +334,7 @@ mod tests {
         let count = flatten_spf(
             "example.com",
             "v=spf1 ip4:1.2.3.0/24 -all",
-            Duration::from_secs(1),
+            crate::checks::dns::DnsOpts::new(Duration::from_secs(1), None),
             0,
             &mut includes,
             &mut visited,
@@ -344,7 +351,7 @@ mod tests {
         let count = flatten_spf(
             "example.com",
             "v=spf1 a mx ptr exists:%{i}._spf.example.com -all",
-            Duration::from_secs(1),
+            crate::checks::dns::DnsOpts::new(Duration::from_secs(1), None),
             0,
             &mut includes,
             &mut visited,
@@ -363,7 +370,7 @@ mod tests {
         let count = flatten_spf(
             "example.com",
             "v=spf1 include:example.com -all",
-            Duration::from_secs(1),
+            crate::checks::dns::DnsOpts::new(Duration::from_secs(1), None),
             0,
             &mut includes,
             &mut visited,

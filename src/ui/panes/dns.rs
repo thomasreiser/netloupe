@@ -28,7 +28,14 @@ pub fn render(frame: &mut Frame, area: Rect, tab: &TabState) {
         return;
     };
 
-    let mut rows: Vec<(String, String)> = Vec::new();
+    let mut rows: Vec<(String, String)> = vec![(
+        "Resolver".to_string(),
+        if dns.resolver == "system" {
+            "system default".to_string()
+        } else {
+            dns.resolver.clone()
+        },
+    )];
     for ip in &dns.a {
         rows.push(("A".to_string(), ip.to_string()));
     }

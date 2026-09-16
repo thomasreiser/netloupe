@@ -116,7 +116,8 @@ async fn walk(
         ..Default::default()
     };
 
-    let resolver = match super::dns::dnssec_probe_resolver(timeout) {
+    let opts = super::dns::DnsOpts::new(timeout, ctx.resolver);
+    let resolver = match super::dns::dnssec_probe_resolver(opts) {
         Ok(r) => r,
         Err(err) => {
             result.errors.push(format!(

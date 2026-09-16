@@ -170,6 +170,7 @@ mod tests {
             cancel: CancellationToken::new(),
             shared: SharedResultsHandle::new(),
             providers: Arc::new(ProviderDb::default()),
+            resolver: None,
         };
         let (tx, mut rx) = mpsc::channel(8);
         run(ctx, tx).await;

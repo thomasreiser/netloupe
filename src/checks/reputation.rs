@@ -69,8 +69,9 @@ pub(crate) async fn run(ctx: CheckContext, tx: mpsc::Sender<CheckEvent>) {
         };
 
         let timeout = ctx.config.timeouts.reputation;
+        let dns_opts = crate::checks::dns::DnsOpts::new(timeout, ctx.resolver);
         for &zone in DNSBL_ZONES {
-            result.dnsbl.push(query_dnsbl(v4, zone, timeout).await);
+            result.dnsbl.push(query_dnsbl(v4, zone, dns_opts).await);
         }
 
         match query_tor_exit_list(v4, timeout).await {
@@ -95,9 +96,9 @@ fn reversed_octets(ip: Ipv4Addr) -> String {
     format!("{}.{}.{}.{}", o[3], o[2], o[1], o[0])
 }
 
-async fn query_dnsbl(ip: Ipv4Addr, zone: &str, timeout: Duration) -> DnsblHit {
+async fn query_dnsbl(ip: Ipv4Addr, zone: &str, opts: crate::checks::dns::DnsOpts) -> DnsblHit {
     let query = format!("{}.{zone}", reversed_octets(ip));
-    match crate::checks::dns::resolve_addrs(&query, timeout).await {
+    match crate::checks::dns::resolve_addrs(&query, opts).await {
         Ok(addrs) => {
             let codes = addrs
                 .into_iter()
@@ -196,6 +197,7 @@ mod tests {
             cancel: CancellationToken::new(),
             shared: SharedResultsHandle::new(),
             providers: Arc::new(ProviderDb::default()),
+            resolver: None,
         };
         let (tx, mut rx) = mpsc::channel(8);
         run(ctx, tx).await;

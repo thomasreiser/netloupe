@@ -115,7 +115,8 @@ pub(crate) async fn run(ctx: CheckContext, tx: mpsc::Sender<CheckEvent>) {
         // about an address it has never heard of. `class` (rendered by the
         // pane) already says exactly what kind of local address this is.
         if result.class.is_global() {
-            match lookup_asn(ip, ctx.config.timeouts.dns).await {
+            let opts = crate::checks::dns::DnsOpts::new(ctx.config.timeouts.dns, ctx.resolver);
+            match lookup_asn(ip, opts).await {
                 Ok(asn) => result.asn = asn,
                 Err(err) => result.errors.push(format!("ASN lookup: {err}")),
             }
@@ -222,7 +223,10 @@ fn reversed_v6_labels(ip: Ipv6Addr) -> String {
         .join(".")
 }
 
-async fn lookup_asn(ip: IpAddr, timeout: Duration) -> Result<Option<AsnInfo>, String> {
+async fn lookup_asn(
+    ip: IpAddr,
+    opts: crate::checks::dns::DnsOpts,
+) -> Result<Option<AsnInfo>, String> {
     let (query, is_v6) = match ip {
         IpAddr::V4(v4) => (
             format!("{}.origin.asn.cymru.com", reversed_v4_labels(v4)),
@@ -235,7 +239,7 @@ async fn lookup_asn(ip: IpAddr, timeout: Duration) -> Result<Option<AsnInfo>, St
     };
     let _ = is_v6;
 
-    let txt = crate::checks::dns::lookup_txt(&query, timeout).await?;
+    let txt = crate::checks::dns::lookup_txt(&query, opts).await?;
     let Some(first) = txt.into_iter().next() else {
         return Ok(None);
     };
@@ -244,7 +248,7 @@ async fn lookup_asn(ip: IpAddr, timeout: Duration) -> Result<Option<AsnInfo>, St
     };
 
     if let Ok(name_txt) =
-        crate::checks::dns::lookup_txt(&format!("AS{}.asn.cymru.com", info.asn), timeout).await
+        crate::checks::dns::lookup_txt(&format!("AS{}.asn.cymru.com", info.asn), opts).await
     {
         if let Some(name_record) = name_txt.first() {
             info.as_name = parse_as_name_txt(name_record);
@@ -368,6 +372,7 @@ mod tests {
             cancel: CancellationToken::new(),
             shared: SharedResultsHandle::new(),
             providers: Arc::new(ProviderDb::default()),
+            resolver: None,
         };
         let (tx, mut rx) = mpsc::channel(8);
         run(ctx, tx).await;

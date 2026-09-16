@@ -125,14 +125,37 @@ pub struct ResolverComparison {
     pub result: Result<Vec<IpAddr>, String>,
 }
 
+/// Which resolver to query and how long to wait — bundled since nearly
+/// every lookup in this module needs both together. `resolver` carries
+/// the per-tab custom DNS server the user picked when opening the tab
+/// (`CheckContext::resolver`), threaded down to every lookup here,
+/// including the ones other checks (mail, acme, altnames, ...) make
+/// through this module's public `lookup_*`/`resolve_addrs` functions —
+/// `None` means the system's normally-configured resolver.
+#[derive(Debug, Clone, Copy)]
+pub struct DnsOpts {
+    pub timeout: Duration,
+    pub resolver: Option<IpAddr>,
+}
+
+impl DnsOpts {
+    pub fn new(timeout: Duration, resolver: Option<IpAddr>) -> Self {
+        Self { timeout, resolver }
+    }
+}
+
 pub(crate) async fn run(ctx: CheckContext, tx: mpsc::Sender<CheckEvent>) {
     let id = super::CheckId::Dns;
     super::run_guarded(&ctx, id, &tx, async {
         let timeout = ctx.config.timeouts.dns;
+        let opts = DnsOpts::new(timeout, ctx.resolver);
         let mut result = match &ctx.target {
-            Target::Host { ascii, .. } => resolve_host(ascii, timeout).await,
-            Target::Ip(ip) => resolve_ip(*ip, timeout).await,
+            Target::Host { ascii, .. } => resolve_host(ascii, opts).await,
+            Target::Ip(ip) => resolve_ip(*ip, opts).await,
         };
+        if let Some(server) = ctx.resolver {
+            result.resolver = server.to_string();
+        }
 
         // Feed anything hosting-relevant into the shared store immediately,
         // even though this task keeps running comparison lookups.
@@ -147,19 +170,19 @@ pub(crate) async fn run(ctx: CheckContext, tx: mpsc::Sender<CheckEvent>) {
     .await;
 }
 
-async fn resolve_host(name: &str, timeout: Duration) -> DnsResult {
+async fn resolve_host(name: &str, opts: DnsOpts) -> DnsResult {
     let mut result = DnsResult {
         queried_name: name.to_string(),
         resolver: "system".to_string(),
         ..Default::default()
     };
 
-    let resolver = match system_resolver(timeout) {
+    let resolver = match system_resolver(opts) {
         Ok(r) => r,
         Err(err) => {
             result
                 .errors
-                .push(format!("could not set up the system resolver: {err}"));
+                .push(format!("could not set up the resolver: {err}"));
             return result;
         }
     };
@@ -167,20 +190,20 @@ async fn resolve_host(name: &str, timeout: Duration) -> DnsResult {
     fill_forward_records(&resolver, name, &mut result).await;
 
     fill_any_query(&resolver, name, &mut result).await;
-    result.zone_signing = detect_zone_signing(name, timeout).await;
-    result.axfr = attempt_axfr_all(name, &result.ns, timeout).await;
+    result.zone_signing = detect_zone_signing(name, opts).await;
+    result.axfr = attempt_axfr_all(name, &result.ns, opts).await;
 
     result
 }
 
-async fn resolve_ip(ip: IpAddr, timeout: Duration) -> DnsResult {
+async fn resolve_ip(ip: IpAddr, opts: DnsOpts) -> DnsResult {
     let mut result = DnsResult {
         queried_name: ip.to_string(),
         resolver: "system".to_string(),
         ..Default::default()
     };
 
-    match lookup_ptr(ip, timeout).await {
+    match lookup_ptr(ip, opts).await {
         Ok(names) => result.ptr = names,
         Err(err) => result.errors.push(format!("PTR: {err}")),
     }
@@ -190,8 +213,8 @@ async fn resolve_ip(ip: IpAddr, timeout: Duration) -> DnsResult {
 /// Looks up PTR (reverse-DNS) records for an arbitrary IP, for checks
 /// (alternative-hostname discovery) that need a one-off PTR query outside
 /// the main `DnsResult`.
-pub async fn lookup_ptr(ip: IpAddr, timeout: Duration) -> Result<Vec<String>, String> {
-    let resolver = system_resolver(timeout)?;
+pub async fn lookup_ptr(ip: IpAddr, opts: DnsOpts) -> Result<Vec<String>, String> {
+    let resolver = system_resolver(opts)?;
     match resolver.reverse_lookup(ip).await {
         Ok(lookup) => Ok(lookup
             .answers()
@@ -343,8 +366,8 @@ async fn fill_any_query(resolver: &TokioResolver, name: &str, result: &mut DnsRe
 /// resulting NXDOMAIN's authority section for an NSEC or NSEC3 record,
 /// revealing which denial-of-existence method (if either) the zone uses.
 /// Pure protocol observation — this alone doesn't enumerate anything.
-async fn detect_zone_signing(name: &str, timeout: Duration) -> ZoneSigning {
-    let Ok(resolver) = dnssec_probe_resolver(timeout) else {
+async fn detect_zone_signing(name: &str, opts: DnsOpts) -> ZoneSigning {
+    let Ok(resolver) = dnssec_probe_resolver(opts) else {
         return ZoneSigning::NotSignedOrUnknown;
     };
     // Trailing dot: an absolute name, so the resolver queries it as-is
@@ -403,11 +426,11 @@ const AXFR_NAMESERVER_CAP: usize = 4;
 const AXFR_MAX_MESSAGES: usize = 200;
 const AXFR_MAX_RECORDS: usize = 5_000;
 
-async fn attempt_axfr_all(zone: &str, ns_names: &[String], timeout: Duration) -> Vec<AxfrAttempt> {
+async fn attempt_axfr_all(zone: &str, ns_names: &[String], opts: DnsOpts) -> Vec<AxfrAttempt> {
     let mut attempts = Vec::new();
     for ns_name in ns_names.iter().take(AXFR_NAMESERVER_CAP) {
         let ns_host = ns_name.trim_end_matches('.').to_string();
-        let ip = match resolve_addrs(&ns_host, timeout).await {
+        let ip = match resolve_addrs(&ns_host, opts).await {
             Ok(ips) => ips
                 .iter()
                 .find(|ip| ip.is_ipv4())
@@ -424,7 +447,7 @@ async fn attempt_axfr_all(zone: &str, ns_names: &[String], timeout: Duration) ->
             });
             continue;
         };
-        attempts.push(attempt_axfr_one(zone, &ns_host, ip, timeout).await);
+        attempts.push(attempt_axfr_one(zone, &ns_host, ip, opts.timeout).await);
     }
     attempts
 }
@@ -553,10 +576,19 @@ fn resolver_for(ip: IpAddr, timeout: Duration) -> Result<TokioResolver, String> 
     builder.build().map_err(|e| e.to_string())
 }
 
-fn system_resolver(timeout: Duration) -> Result<TokioResolver, String> {
-    let mut builder = TokioResolver::builder_tokio().map_err(|e| e.to_string())?;
-    builder.options_mut().timeout = timeout;
-    builder.build().map_err(|e| e.to_string())
+/// Builds the resolver every plain lookup in this module (and, via the
+/// public `lookup_*`/`resolve_addrs` functions, every other check) goes
+/// through: the per-tab custom DNS server from `opts.resolver` when the
+/// user picked one, otherwise the system's normally-configured resolver.
+fn system_resolver(opts: DnsOpts) -> Result<TokioResolver, String> {
+    match opts.resolver {
+        Some(ip) => resolver_for(ip, opts.timeout),
+        None => {
+            let mut builder = TokioResolver::builder_tokio().map_err(|e| e.to_string())?;
+            builder.options_mut().timeout = opts.timeout;
+            builder.build().map_err(|e| e.to_string())
+        }
+    }
 }
 
 /// A resolver with DNSSEC validation turned on, used by
@@ -566,9 +598,16 @@ fn system_resolver(timeout: Duration) -> Result<TokioResolver, String> {
 /// `system_resolver` so a validation hiccup (a zone with a broken DNSSEC
 /// chain, a slow trust anchor fetch, ...) can only ever affect these DNSSEC
 /// probes, never the A/AAAA/MX/NS/... lookups every other check relies on.
-pub(crate) fn dnssec_probe_resolver(timeout: Duration) -> Result<TokioResolver, String> {
-    let mut builder = TokioResolver::builder_tokio().map_err(|e| e.to_string())?;
-    builder.options_mut().timeout = timeout;
+/// Also honors `opts.resolver`, same as `system_resolver`.
+pub(crate) fn dnssec_probe_resolver(opts: DnsOpts) -> Result<TokioResolver, String> {
+    let mut builder = match opts.resolver {
+        Some(ip) => {
+            let config = ResolverConfig::from_name_servers(vec![NameServerConfig::udp_and_tcp(ip)]);
+            Resolver::builder_with_config(config, TokioRuntimeProvider::default())
+        }
+        None => TokioResolver::builder_tokio().map_err(|e| e.to_string())?,
+    };
+    builder.options_mut().timeout = opts.timeout;
     builder.options_mut().validate = true;
     builder.build().map_err(|e| e.to_string())
 }
@@ -629,8 +668,8 @@ fn fmt_set(ips: &std::collections::BTreeSet<IpAddr>) -> String {
 /// other checks (ping, tls, http) that need an address but don't want to
 /// duplicate resolver setup. Not part of `DnsResult` since it's a plain
 /// utility, not a pane's data.
-pub async fn resolve_addrs(name: &str, timeout: Duration) -> Result<Vec<IpAddr>, String> {
-    let resolver = system_resolver(timeout)?;
+pub async fn resolve_addrs(name: &str, opts: DnsOpts) -> Result<Vec<IpAddr>, String> {
+    let resolver = system_resolver(opts)?;
     resolver
         .lookup_ip(name)
         .await
@@ -640,8 +679,8 @@ pub async fn resolve_addrs(name: &str, timeout: Duration) -> Result<Vec<IpAddr>,
 
 /// Looks up MX records for an arbitrary name, for checks (mail) that need
 /// a one-off MX query outside the main `DnsResult`.
-pub async fn lookup_mx(name: &str, timeout: Duration) -> Result<Vec<MxRecord>, String> {
-    let resolver = system_resolver(timeout)?;
+pub async fn lookup_mx(name: &str, opts: DnsOpts) -> Result<Vec<MxRecord>, String> {
+    let resolver = system_resolver(opts)?;
     match resolver.mx_lookup(name).await {
         Ok(lookup) => Ok(lookup
             .answers()
@@ -663,8 +702,8 @@ pub async fn lookup_mx(name: &str, timeout: Duration) -> Result<Vec<MxRecord>, S
 /// Cymru ASN whois, ...) that need one-off TXT lookups outside the main
 /// `DnsResult`. Empty on NXDOMAIN/no-data rather than an error, since "no
 /// TXT records" is a normal, common answer.
-pub async fn lookup_txt(name: &str, timeout: Duration) -> Result<Vec<String>, String> {
-    let resolver = system_resolver(timeout)?;
+pub async fn lookup_txt(name: &str, opts: DnsOpts) -> Result<Vec<String>, String> {
+    let resolver = system_resolver(opts)?;
     match resolver.txt_lookup(name).await {
         Ok(lookup) => Ok(lookup
             .answers()
@@ -683,8 +722,8 @@ pub async fn lookup_txt(name: &str, timeout: Duration) -> Result<Vec<String>, St
 /// challenge evidence) that need a one-off CNAME query outside the main
 /// `DnsResult`. `hickory-resolver` has no `cname_lookup` shorthand, so this
 /// goes through the generic `lookup`.
-pub async fn lookup_cname(name: &str, timeout: Duration) -> Result<Option<String>, String> {
-    let resolver = system_resolver(timeout)?;
+pub async fn lookup_cname(name: &str, opts: DnsOpts) -> Result<Option<String>, String> {
+    let resolver = system_resolver(opts)?;
     match resolver.lookup(name, RecordType::CNAME).await {
         Ok(lookup) => Ok(lookup.answers().iter().find_map(|r| match &r.data {
             RData::CNAME(cname) => Some(cname.0.to_string()),

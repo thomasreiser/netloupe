@@ -13,6 +13,8 @@ use ratatui::DefaultTerminal;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+use std::net::IpAddr;
+
 use crate::checks::{self, CheckContext, CheckId, SharedResultsHandle};
 use crate::config::Config;
 use crate::event::{Action, CheckEvent, CheckPayload, CheckUpdate};
@@ -137,6 +139,10 @@ pub struct TabState {
     /// changes, since a stale scroll position from a different pane's
     /// (differently shaped) content would be meaningless.
     pub scroll: u16,
+    /// The DNS server every check for this tab resolves names against,
+    /// chosen once via `Mode::ChooseResolver` when the tab was opened.
+    /// `None` = the system's normally-configured resolver.
+    pub resolver: Option<IpAddr>,
 }
 
 impl TabState {
@@ -163,6 +169,15 @@ pub enum Mode {
         names: Vec<crate::checks::altnames::AltName>,
         selected: usize,
     },
+    /// Which DNS server the about-to-open tab should use, asked every
+    /// time a new host is entered (never silently reused without
+    /// confirmation) but pre-filled with the last one chosen, so
+    /// repeating the same server is just Enter. Blank input means the
+    /// system's normally-configured resolver.
+    ChooseResolver {
+        target: Target,
+        input: String,
+    },
 }
 
 pub struct AppState {
@@ -173,6 +188,11 @@ pub struct AppState {
     pub config: Arc<Config>,
     pub providers: Arc<ProviderDb>,
     pub data_age_warning: Option<String>,
+    /// The most recently chosen custom DNS server (across any tab this
+    /// session), used to pre-fill `Mode::ChooseResolver` so picking the
+    /// same one again is just Enter. `None` once no custom resolver has
+    /// been chosen yet, or if the last choice was "system default".
+    pub last_resolver: Option<IpAddr>,
     next_tab_id: AtomicU64,
 }
 
@@ -186,6 +206,7 @@ impl AppState {
             config: Arc::new(config),
             providers: Arc::new(providers),
             data_age_warning: None,
+            last_resolver: None,
             next_tab_id: AtomicU64::new(1),
         }
     }
@@ -196,7 +217,16 @@ impl AppState {
 
     /// Opens a new tab for `target` and spawns every non-opt-in check for
     /// it, tagged with `sender` so their events route back to this tab.
-    pub fn open_tab(&mut self, target: Target, sender: &mpsc::Sender<CheckEvent>) {
+    /// `resolver`: `None` for the system's default resolver, `Some(ip)`
+    /// to query that DNS server instead for every lookup this tab makes
+    /// (see `Mode::ChooseResolver`, which every interactive new-tab flow
+    /// goes through before calling this).
+    pub fn open_tab(
+        &mut self,
+        target: Target,
+        resolver: Option<IpAddr>,
+        sender: &mpsc::Sender<CheckEvent>,
+    ) {
         let id = self.next_tab_id.fetch_add(1, Ordering::Relaxed);
         let cancel = CancellationToken::new();
         let shared = SharedResultsHandle::new();
@@ -212,19 +242,22 @@ impl AppState {
             ports_confirmed: None,
             zone_walk_confirmed: None,
             scroll: 0,
+            resolver,
         };
         self.tabs.push(tab);
         self.active_tab = self.tabs.len() - 1;
 
-        self.spawn_checks(id, target, cancel, shared, sender.clone(), &[]);
+        self.spawn_checks(id, target, cancel, shared, resolver, sender.clone(), &[]);
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn spawn_checks(
         &self,
         tab_id: u64,
         target: Target,
         cancel: CancellationToken,
         shared: SharedResultsHandle,
+        resolver: Option<IpAddr>,
         sender: mpsc::Sender<CheckEvent>,
         confirmed_opt_ins: &[CheckId],
     ) {
@@ -240,6 +273,7 @@ impl AppState {
                 cancel: cancel.clone(),
                 shared: shared.clone(),
                 providers: self.providers.clone(),
+                resolver,
             };
             let tx = sender.clone();
             tokio::spawn(async move { check.run(ctx, tx).await });
@@ -257,6 +291,7 @@ impl AppState {
         let target = tab.target.clone();
         let cancel = tab.cancel.clone();
         let shared = tab.shared.clone();
+        let resolver = tab.resolver;
 
         for &check_id in pane.checks() {
             if check_id.requires_opt_in() {
@@ -268,6 +303,7 @@ impl AppState {
                 target.clone(),
                 cancel.clone(),
                 shared.clone(),
+                resolver,
                 sender.clone(),
             );
         }
@@ -282,6 +318,7 @@ impl AppState {
         let target = tab.target.clone();
         let cancel = tab.cancel.clone();
         let shared = tab.shared.clone();
+        let resolver = tab.resolver;
         let mut confirmed_opt_ins = Vec::new();
         if tab.ports_confirmed == Some(true) {
             confirmed_opt_ins.push(CheckId::Ports);
@@ -294,11 +331,14 @@ impl AppState {
             target,
             cancel,
             shared,
+            resolver,
             sender.clone(),
             &confirmed_opt_ins,
         );
     }
 
+    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
     fn spawn_one_check(
         &self,
         check_id: CheckId,
@@ -306,6 +346,7 @@ impl AppState {
         target: Target,
         cancel: CancellationToken,
         shared: SharedResultsHandle,
+        resolver: Option<IpAddr>,
         sender: mpsc::Sender<CheckEvent>,
     ) {
         if let Some(check) = checks::registry().into_iter().find(|c| c.id() == check_id) {
@@ -317,6 +358,7 @@ impl AppState {
                 cancel,
                 shared,
                 providers: self.providers.clone(),
+                resolver,
             };
             tokio::spawn(async move { check.run(ctx, sender).await });
         }
@@ -335,12 +377,14 @@ impl AppState {
         let target = tab.target.clone();
         let cancel = tab.cancel.clone();
         let shared = tab.shared.clone();
+        let resolver = tab.resolver;
         self.spawn_one_check(
             CheckId::Ports,
             tab_id,
             target,
             cancel,
             shared,
+            resolver,
             sender.clone(),
         );
     }
@@ -357,14 +401,29 @@ impl AppState {
         let target = tab.target.clone();
         let cancel = tab.cancel.clone();
         let shared = tab.shared.clone();
+        let resolver = tab.resolver;
         self.spawn_one_check(
             CheckId::ZoneWalk,
             tab_id,
             target,
             cancel,
             shared,
+            resolver,
             sender.clone(),
         );
+    }
+
+    /// Builds the "which DNS server?" prompt for `target`, pre-filled
+    /// with the last one chosen this session (or blank for "system
+    /// default" if none has been).
+    fn choose_resolver_mode(&self, target: Target) -> Mode {
+        Mode::ChooseResolver {
+            target,
+            input: self
+                .last_resolver
+                .map(|ip| ip.to_string())
+                .unwrap_or_default(),
+        }
     }
 
     pub fn close_active_tab(&mut self) {
@@ -408,8 +467,7 @@ impl AppState {
             }
             (Mode::NewHostPrompt(buf), Action::InputSubmit) => {
                 if let Ok(target) = Target::parse(buf.trim()) {
-                    self.mode = Mode::Normal;
-                    self.open_tab(target, sender);
+                    self.mode = self.choose_resolver_mode(target);
                 } else {
                     buf.clear();
                 }
@@ -449,11 +507,35 @@ impl AppState {
                     .get(*selected)
                     .and_then(|n| Target::parse(&n.name).ok())
                 {
+                    // Reuses the current tab's resolver rather than asking
+                    // again: picking an alternative name found *while
+                    // already inspecting this host* is a quick cross-
+                    // reference, not the deliberate "start fresh" that
+                    // Ctrl+T's new-host flow is -- re-prompting here would
+                    // just be friction for the common case of wanting the
+                    // same (often custom, e.g. internal) resolver again.
+                    let resolver = self.active().and_then(|t| t.resolver);
                     self.mode = Mode::Normal;
-                    self.open_tab(target, sender);
+                    self.open_tab(target, resolver, sender);
                 }
             }
             (Mode::SelectAltName { .. }, Action::InputCancel) => self.mode = Mode::Normal,
+            (Mode::ChooseResolver { input, .. }, Action::InputChar(c)) => input.push(c),
+            (Mode::ChooseResolver { input, .. }, Action::InputBackspace) => {
+                input.pop();
+            }
+            (Mode::ChooseResolver { target, input }, Action::InputSubmit) => {
+                match parse_resolver_input(input) {
+                    Ok(resolver) => {
+                        let target = target.clone();
+                        self.last_resolver = resolver;
+                        self.mode = Mode::Normal;
+                        self.open_tab(target, resolver, sender);
+                    }
+                    Err(()) => input.clear(),
+                }
+            }
+            (Mode::ChooseResolver { .. }, Action::InputCancel) => self.mode = Mode::Normal,
             (Mode::Normal, action) => self.handle_normal_action(action, sender),
             _ => {}
         }
@@ -594,6 +676,19 @@ impl AppState {
 
 /// Decodes a raw crossterm key event into an [`Action`], depending on the
 /// current mode (typing in the new-host prompt takes over the keyboard).
+/// Blank input means "system default" (`Ok(None)`); anything else must
+/// parse as a bare IP address, since that's the only thing
+/// `hickory-resolver` can point a resolver at directly here — a
+/// hostname (e.g. a resolver's own DNS name) would need its own
+/// resolution step this prompt doesn't do.
+fn parse_resolver_input(input: &str) -> Result<Option<IpAddr>, ()> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    trimmed.parse::<IpAddr>().map(Some).map_err(|_| ())
+}
+
 fn decode_key(mode: &Mode, key: crossterm::event::KeyEvent) -> Action {
     use crossterm::event::KeyCode;
     if key.kind == crossterm::event::KeyEventKind::Release {
@@ -601,7 +696,7 @@ fn decode_key(mode: &Mode, key: crossterm::event::KeyEvent) -> Action {
     }
 
     match mode {
-        Mode::NewHostPrompt(_) => match key.code {
+        Mode::NewHostPrompt(_) | Mode::ChooseResolver { .. } => match key.code {
             KeyCode::Char(c) => Action::InputChar(c),
             KeyCode::Backspace => Action::InputBackspace,
             KeyCode::Enter => Action::InputSubmit,
@@ -703,7 +798,11 @@ pub async fn run(
     let (check_tx, mut check_rx) = mpsc::channel::<CheckEvent>(1024);
     let mut state = AppState::new(config, providers);
     for target in initial_targets {
-        state.open_tab(target, &check_tx);
+        // CLI-provided hosts skip the interactive resolver prompt (there's
+        // no prompt to show before the terminal is even drawn); the
+        // system's default resolver applies. `--resolver` on `check
+        // <target>` covers the same need for the headless path.
+        state.open_tab(target, None, &check_tx);
     }
 
     loop {
@@ -766,7 +865,7 @@ mod tests {
     async fn opening_the_picker_without_discovered_names_is_a_no_op() {
         let mut state = AppState::new(Config::default(), ProviderDb::default());
         let tx = test_sender();
-        state.open_tab(local_target(), &tx);
+        state.open_tab(local_target(), None, &tx);
 
         state.handle_action(Action::OpenAltNames, &tx);
 
@@ -777,7 +876,7 @@ mod tests {
     async fn opening_the_picker_with_discovered_names_enters_select_mode() {
         let mut state = AppState::new(Config::default(), ProviderDb::default());
         let tx = test_sender();
-        state.open_tab(local_target(), &tx);
+        state.open_tab(local_target(), None, &tx);
         with_alt_names(
             &mut state,
             vec![AltName {
@@ -795,7 +894,7 @@ mod tests {
     async fn selecting_and_confirming_opens_a_new_tab_for_that_name() {
         let mut state = AppState::new(Config::default(), ProviderDb::default());
         let tx = test_sender();
-        state.open_tab(local_target(), &tx);
+        state.open_tab(local_target(), None, &tx);
         with_alt_names(
             &mut state,
             vec![
@@ -825,7 +924,7 @@ mod tests {
     async fn select_up_does_not_go_below_the_first_item() {
         let mut state = AppState::new(Config::default(), ProviderDb::default());
         let tx = test_sender();
-        state.open_tab(local_target(), &tx);
+        state.open_tab(local_target(), None, &tx);
         with_alt_names(
             &mut state,
             vec![AltName {
@@ -848,7 +947,7 @@ mod tests {
     async fn select_down_does_not_go_past_the_last_item() {
         let mut state = AppState::new(Config::default(), ProviderDb::default());
         let tx = test_sender();
-        state.open_tab(local_target(), &tx);
+        state.open_tab(local_target(), None, &tx);
         with_alt_names(
             &mut state,
             vec![
@@ -878,7 +977,7 @@ mod tests {
     async fn cancel_returns_to_normal_without_opening_a_tab() {
         let mut state = AppState::new(Config::default(), ProviderDb::default());
         let tx = test_sender();
-        state.open_tab(local_target(), &tx);
+        state.open_tab(local_target(), None, &tx);
         with_alt_names(
             &mut state,
             vec![AltName {
@@ -892,5 +991,91 @@ mod tests {
 
         assert!(matches!(state.mode, Mode::Normal));
         assert_eq!(state.tabs.len(), 1);
+    }
+
+    #[test]
+    fn parse_resolver_input_accepts_blank_and_valid_ips_and_rejects_garbage() {
+        assert_eq!(parse_resolver_input(""), Ok(None));
+        assert_eq!(parse_resolver_input("   "), Ok(None));
+        assert_eq!(
+            parse_resolver_input("1.1.1.1"),
+            Ok(Some("1.1.1.1".parse().unwrap()))
+        );
+        assert_eq!(
+            parse_resolver_input("2001:4860:4860::8888"),
+            Ok(Some("2001:4860:4860::8888".parse().unwrap()))
+        );
+        assert_eq!(parse_resolver_input("not-an-ip"), Err(()));
+    }
+
+    /// The full interactive flow this feature is for: entering a new host
+    /// always asks which DNS server to use (never silently reuses one
+    /// without confirmation), pre-filled with the last one chosen, and the
+    /// opened tab actually carries that choice through to its `TabState`
+    /// (which is what every check's `CheckContext::resolver` reads).
+    #[tokio::test]
+    async fn new_host_flow_asks_for_a_resolver_and_carries_it_to_the_tab() {
+        let mut state = AppState::new(Config::default(), ProviderDb::default());
+        let tx = test_sender();
+
+        state.handle_action(Action::NewTab, &tx);
+        assert!(matches!(state.mode, Mode::NewHostPrompt(_)));
+        for c in "192.168.1.1".chars() {
+            state.handle_action(Action::InputChar(c), &tx);
+        }
+        state.handle_action(Action::InputSubmit, &tx);
+
+        // Not open yet -- the resolver prompt comes first, pre-filled
+        // blank (no prior choice this session).
+        assert!(state.tabs.is_empty());
+        let Mode::ChooseResolver { input, .. } = &state.mode else {
+            panic!("expected ChooseResolver mode, got a different mode");
+        };
+        assert_eq!(input, "");
+
+        for c in "9.9.9.9".chars() {
+            state.handle_action(Action::InputChar(c), &tx);
+        }
+        state.handle_action(Action::InputSubmit, &tx);
+
+        assert!(matches!(state.mode, Mode::Normal));
+        assert_eq!(state.tabs.len(), 1);
+        assert_eq!(state.tabs[0].resolver, Some("9.9.9.9".parse().unwrap()));
+        assert_eq!(state.last_resolver, Some("9.9.9.9".parse().unwrap()));
+
+        // Opening a second host pre-fills the prompt with that choice.
+        state.handle_action(Action::NewTab, &tx);
+        for c in "192.168.1.2".chars() {
+            state.handle_action(Action::InputChar(c), &tx);
+        }
+        state.handle_action(Action::InputSubmit, &tx);
+        let Mode::ChooseResolver { input, .. } = &state.mode else {
+            panic!("expected ChooseResolver mode, got a different mode");
+        };
+        assert_eq!(input, "9.9.9.9");
+    }
+
+    #[tokio::test]
+    async fn invalid_resolver_input_is_rejected_rather_than_opening_the_tab() {
+        let mut state = AppState::new(Config::default(), ProviderDb::default());
+        let tx = test_sender();
+        state.handle_action(Action::NewTab, &tx);
+        for c in "192.168.1.1".chars() {
+            state.handle_action(Action::InputChar(c), &tx);
+        }
+        state.handle_action(Action::InputSubmit, &tx);
+
+        for c in "not-an-ip".chars() {
+            state.handle_action(Action::InputChar(c), &tx);
+        }
+        state.handle_action(Action::InputSubmit, &tx);
+
+        // Rejected, not silently treated as "system default" -- still
+        // prompting, with the bad input cleared so the user can retry.
+        assert!(state.tabs.is_empty());
+        let Mode::ChooseResolver { input, .. } = &state.mode else {
+            panic!("expected ChooseResolver mode, got a different mode");
+        };
+        assert_eq!(input, "");
     }
 }
