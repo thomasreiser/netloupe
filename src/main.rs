@@ -274,6 +274,35 @@ fn check_json(status: &CheckStatus, update: Option<&CheckUpdate>) -> serde_json:
     json!({ "status": status_str, "error": error, "data": data })
 }
 
+fn certificate_detail_json(cert: &netloupe::checks::tls::CertificateDetail) -> serde_json::Value {
+    use serde_json::json;
+    json!({
+        "subject": cert.subject,
+        "issuer": cert.issuer,
+        "serial_number": cert.serial_number,
+        "version": cert.version,
+        "signature_algorithm": cert.signature_algorithm,
+        "public_key_algorithm": cert.public_key_algorithm,
+        "public_key_bits": cert.public_key_bits,
+        "not_before_unix": cert.not_before_unix,
+        "not_after_unix": cert.not_after_unix,
+        "sha256_fingerprint": cert.sha256_fingerprint,
+        "sha1_fingerprint": cert.sha1_fingerprint,
+        "is_ca": cert.is_ca,
+        "path_len_constraint": cert.path_len_constraint,
+        "key_usage": cert.key_usage,
+        "extended_key_usage": cert.extended_key_usage,
+        "subject_key_identifier": cert.subject_key_identifier,
+        "authority_key_identifier": cert.authority_key_identifier,
+        "crl_distribution_points": cert.crl_distribution_points,
+        "ocsp_urls": cert.ocsp_urls,
+        "ca_issuers_urls": cert.ca_issuers_urls,
+        "sct_count": cert.sct_count,
+        "sans": cert.sans,
+        "is_self_signed": cert.is_self_signed,
+    })
+}
+
 fn acme_json(acme: &netloupe::checks::acme::AcmeInfo) -> serde_json::Value {
     use netloupe::checks::acme::ChallengeHint;
     use serde_json::json;
@@ -372,6 +401,7 @@ fn update_json(update: &CheckUpdate) -> serde_json::Value {
             "protocol_version": t.protocol_version, "cipher_suite": t.cipher_suite,
             "issuer": t.issuer, "subject": t.subject, "sans": t.sans,
             "days_until_expiry": t.days_until_expiry,
+            "chain": t.chain.iter().map(certificate_detail_json).collect::<Vec<_>>(),
             "acme": t.acme.as_ref().map(acme_json),
             "errors": t.errors,
         }),
@@ -386,9 +416,13 @@ fn update_json(update: &CheckUpdate) -> serde_json::Value {
                 "status": p.status,
                 "redirects_to_https": p.redirects_to_https,
                 "error": p.error,
-                "h2c_supported": p.h2c_supported,
             })),
-            "http3_supported": h.http3_supported,
+            "versions": {
+                "http1_tls": h.versions.http1_tls,
+                "http2_tls": h.versions.http2_tls,
+                "h2c": h.versions.h2c,
+                "http3": h.versions.http3,
+            },
             "errors": h.errors,
         }),
         CheckUpdate::Geo(g) => json!({

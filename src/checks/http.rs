@@ -61,13 +61,29 @@ pub struct PlainHttpProbe {
     /// the common "upgrade to TLS" redirect pattern.
     pub redirects_to_https: bool,
     pub error: Option<String>,
-    /// Whether the server accepted an HTTP/2-over-cleartext ("h2c")
-    /// connection via prior knowledge (the client just speaks the HTTP/2
-    /// wire format directly, no TLS/ALPN and no Upgrade-header
-    /// negotiation involved) -- a separate connection attempt from the
-    /// plain-HTTP/1.1 request above, so this can be `true` even when
-    /// `reachable` is `false` for HTTP/1.1's own request, or vice versa.
-    pub h2c_supported: bool,
+}
+
+/// Whether each HTTP version/transport is supported, each from its own
+/// dedicated, protocol-forced connection attempt (not inferred from
+/// whichever one the main flow's ordinary negotiation happened to land
+/// on) -- so this is a real, independent yes/no per protocol, not just
+/// "here's the one the client preferred." The main flow's `http_version`
+/// only ever reports one of these (whichever a normal client's ALPN
+/// negotiation picks), which previously made it easy to misread "server
+/// picked HTTP/2" as "server doesn't support HTTP/3": the two are
+/// unrelated questions -- QUIC/HTTP-3 support isn't discoverable via
+/// ALPN over a plain TCP+TLS connection at all.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct HttpVersionSupport {
+    /// HTTPS, client offers only `http/1.1` via ALPN.
+    pub http1_tls: bool,
+    /// HTTPS, client offers only `h2` via ALPN.
+    pub http2_tls: bool,
+    /// Plain `http://`, HTTP/2 via prior knowledge (no TLS/ALPN, no
+    /// Upgrade-header negotiation) -- rare in practice.
+    pub h2c: bool,
+    /// QUIC (UDP) via prior knowledge, over HTTPS's host/port.
+    pub http3: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -85,10 +101,7 @@ pub struct HttpResult {
     /// `http://` retry was made instead.
     pub fell_back_to_http: bool,
     pub plain_http: Option<PlainHttpProbe>,
-    /// Whether an HTTP/3-only request (QUIC over UDP, TLS 1.3, no
-    /// fallback) to the same host/port succeeded -- a separate connection
-    /// attempt from the main flow above, which never tries HTTP/3 itself.
-    pub http3_supported: bool,
+    pub versions: HttpVersionSupport,
     pub errors: Vec<String>,
 }
 
@@ -108,19 +121,22 @@ pub(crate) async fn run(ctx: CheckContext, tx: mpsc::Sender<CheckEvent>) {
             ..Default::default()
         };
 
-        // The plain-HTTP-on-port-80 and HTTP/3 probes are independent of
-        // whichever scheme the main flow below lands on (including the
-        // fallback just below it), so they run concurrently rather than
-        // being folded into that logic.
+        let http_url = url_for(&host, port, false);
+
+        // Every version/transport probe below is independent of the main
+        // flow (and of each other), so they all run concurrently rather
+        // than being folded into that logic.
         let plain_http_probe = probe_plain_http(&host, port.unwrap_or(80), timeout);
-        let http3_probe = probe_http3(&https_url, timeout);
+        let http1_probe = probe_forced(&https_url, timeout, reqwest::Version::HTTP_11, false);
+        let http2_probe = probe_forced(&https_url, timeout, reqwest::Version::HTTP_2, false);
+        let h2c_probe = probe_forced(&http_url, timeout, reqwest::Version::HTTP_2, false);
+        let http3_probe = probe_forced(&https_url, timeout, reqwest::Version::HTTP_3, true);
 
         let main_flow = async {
             if let Err(https_err) = run_into(&https_url, timeout, &mut result).await {
                 // HTTPS didn't even connect (refused, TLS failure, ...); retry
                 // once over plain HTTP so the pane still shows something for a
                 // site that simply doesn't speak TLS.
-                let http_url = url_for(&host, port, false);
                 result
                     .errors
                     .push(format!("HTTPS failed ({https_err}); retrying over HTTP"));
@@ -132,10 +148,21 @@ pub(crate) async fn run(ctx: CheckContext, tx: mpsc::Sender<CheckEvent>) {
             }
         };
 
-        let (_, plain_http, http3_supported) =
-            tokio::join!(main_flow, plain_http_probe, http3_probe);
+        let (_, plain_http, http1, http2, h2c, http3) = tokio::join!(
+            main_flow,
+            plain_http_probe,
+            http1_probe,
+            http2_probe,
+            h2c_probe,
+            http3_probe
+        );
         result.plain_http = Some(plain_http);
-        result.http3_supported = http3_supported;
+        result.versions = HttpVersionSupport {
+            http1_tls: http1,
+            http2_tls: http2,
+            h2c,
+            http3,
+        };
 
         ctx.shared.set_http(result.clone()).await;
         Ok(CheckUpdate::Http(result))
@@ -149,7 +176,6 @@ pub(crate) async fn run(ctx: CheckContext, tx: mpsc::Sender<CheckEvent>) {
 /// `fell_back_to_http` (which only fires when HTTPS fails outright).
 async fn probe_plain_http(host: &str, port: u16, timeout: Duration) -> PlainHttpProbe {
     let url = format!("http://{host}:{port}/");
-    let h2c_supported = probe_h2c(&url, timeout).await;
 
     let client = match build_client(timeout) {
         Ok(client) => client,
@@ -160,7 +186,6 @@ async fn probe_plain_http(host: &str, port: u16, timeout: Duration) -> PlainHttp
                 status: None,
                 redirects_to_https: false,
                 error: Some(err),
-                h2c_supported,
             }
         }
     };
@@ -179,7 +204,6 @@ async fn probe_plain_http(host: &str, port: u16, timeout: Duration) -> PlainHttp
                 status: Some(status),
                 redirects_to_https,
                 error: None,
-                h2c_supported,
             }
         }
         Err(err) => PlainHttpProbe {
@@ -188,57 +212,52 @@ async fn probe_plain_http(host: &str, port: u16, timeout: Duration) -> PlainHttp
             status: None,
             redirects_to_https: false,
             error: Some(err.to_string()),
-            h2c_supported,
         },
     }
 }
 
-/// Attempts an HTTP/2-over-cleartext connection via "prior knowledge"
-/// (the client speaks the HTTP/2 wire format directly, no TLS/ALPN and no
-/// Upgrade-header negotiation) -- a separate connection from the plain
-/// HTTP/1.1 request `probe_plain_http` also makes, since a server that
-/// doesn't understand h2c will usually just fail the connection outright
-/// rather than gracefully falling back.
-async fn probe_h2c(url: &str, timeout: Duration) -> bool {
-    let Ok(client) = reqwest::Client::builder()
+/// Attempts a request to `url` with the client forced onto exactly one
+/// HTTP version -- no fallback to anything else, so success is a real,
+/// independent "yes" for that specific version/transport rather than
+/// just whichever one a normal client's negotiation happened to prefer.
+/// Used for all four version probes (HTTP/1.1-only, HTTP/2-only over
+/// TLS, h2c over plain `http://`, and HTTP/3 over QUIC): which one
+/// depends only on `url`'s scheme and `version`.
+///
+/// `is_http3` exists because HTTP/3 needs an extra step past what the
+/// other three versions do: `.http3_prior_knowledge()` only prepares the
+/// client's QUIC connector at build time, and an individual *request*
+/// still needs `.version(HTTP_3)` set explicitly or it silently falls
+/// through to HTTP/1.1 with no error at all -- the other versions'
+/// builder methods (`.http1_only()`, `.http2_prior_knowledge()`) don't
+/// have this quirk, since they configure the connection itself rather
+/// than requiring a matching per-request marker.
+async fn probe_forced(
+    url: &str,
+    timeout: Duration,
+    version: reqwest::Version,
+    is_http3: bool,
+) -> bool {
+    let mut builder = reqwest::Client::builder()
         .timeout(timeout)
         .redirect(reqwest::redirect::Policy::none())
-        .user_agent(concat!("netloupe/", env!("CARGO_PKG_VERSION")))
-        .http2_prior_knowledge()
-        .build()
-    else {
+        .user_agent(concat!("netloupe/", env!("CARGO_PKG_VERSION")));
+    builder = match version {
+        reqwest::Version::HTTP_11 => builder.http1_only(),
+        reqwest::Version::HTTP_2 => builder.http2_prior_knowledge(),
+        reqwest::Version::HTTP_3 => builder.http3_prior_knowledge(),
+        _ => builder,
+    };
+    let Ok(client) = builder.build() else {
         return false;
     };
-    matches!(
-        client.get(url).send().await,
-        Ok(response) if response.version() == reqwest::Version::HTTP_2
-    )
-}
-
-/// Attempts an HTTP/3-only request (QUIC over UDP, TLS 1.3 via QUIC's own
-/// handshake) to `url` -- a separate connection from the main HTTPS flow,
-/// which never negotiates HTTP/3 itself. There's no fallback within a
-/// single request here: if the server doesn't answer on QUIC, this simply
-/// fails, which is exactly the "no" this probe is asking for.
-async fn probe_http3(url: &str, timeout: Duration) -> bool {
-    let Ok(client) = reqwest::Client::builder()
-        .timeout(timeout)
-        .redirect(reqwest::redirect::Policy::none())
-        .user_agent(concat!("netloupe/", env!("CARGO_PKG_VERSION")))
-        .http3_prior_knowledge()
-        .build()
-    else {
-        return false;
-    };
-    // `http3_prior_knowledge()` alone only prepares the client's QUIC
-    // connector; a request still needs `.version(HTTP_3)` set explicitly
-    // to actually dispatch through it; the client's HTTP/2 counterpart
-    // doesn't have this quirk since it also negotiates HTTP/2 normally
-    // over any HTTPS request.
-    let request = client.get(url).version(reqwest::Version::HTTP_3);
+    let mut request = client.get(url);
+    if is_http3 {
+        request = request.version(version);
+    }
     matches!(
         request.send().await,
-        Ok(response) if response.version() == reqwest::Version::HTTP_3
+        Ok(response) if response.version() == version
     )
 }
 

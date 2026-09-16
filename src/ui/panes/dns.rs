@@ -271,5 +271,6 @@ fn render_discovery(
         _ => {}
     }
 
-    frame.render_widget(Paragraph::new(lines).scroll((tab.scroll, 0)), inner);
+    let scroll = super::clamp_scroll(tab.scroll, lines.len(), inner.height);
+    frame.render_widget(Paragraph::new(lines).scroll((scroll, 0)), inner);
 }

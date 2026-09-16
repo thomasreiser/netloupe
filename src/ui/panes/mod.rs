@@ -121,3 +121,33 @@ pub(super) fn errors_widget(errors: &[String]) -> Paragraph<'static> {
 pub(super) fn is_waiting(status: &CheckStatus) -> bool {
     matches!(status, CheckStatus::NotStarted | CheckStatus::Running)
 }
+
+/// Clamps a raw scroll offset (lines) so it never scrolls content fully
+/// out of the frame: once the last line reaches the bottom of the
+/// viewport, scrolling stops there rather than continuing on into blank
+/// space. `Paragraph::scroll` (unlike `kv_table`'s row-based scrolling,
+/// which clamps this internally) has no such limit built in, so callers
+/// that scroll a `Paragraph` directly need this.
+pub(super) fn clamp_scroll(scroll: u16, content_lines: usize, viewport_height: u16) -> u16 {
+    let max_scroll = (content_lines as u16).saturating_sub(viewport_height);
+    scroll.min(max_scroll)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clamp_scroll_stops_once_the_last_line_reaches_the_bottom() {
+        // 20 lines of content, a 5-line viewport: scrolling past 15 would
+        // start pushing real content out of the frame into blank space.
+        assert_eq!(clamp_scroll(0, 20, 5), 0);
+        assert_eq!(clamp_scroll(10, 20, 5), 10);
+        assert_eq!(clamp_scroll(100, 20, 5), 15);
+    }
+
+    #[test]
+    fn clamp_scroll_never_goes_negative_when_content_is_shorter_than_the_viewport() {
+        assert_eq!(clamp_scroll(5, 3, 10), 0);
+    }
+}

@@ -1,5 +1,7 @@
-//! TLS pane: chain, SANs, expiry, negotiated protocol/cipher, and (for a
-//! recognized CA) ACME DNS-01/HTTP-01 challenge analysis.
+//! TLS pane: full per-certificate detail for the leaf (everything a "view
+//! certificate" dialog would show -- serial, fingerprints, public key,
+//! extensions, ...), a compact summary of the rest of the chain, and (for
+//! a recognized CA) ACME DNS-01/HTTP-01 challenge analysis.
 
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -10,6 +12,7 @@ use ratatui::Frame;
 use super::{empty_message, header_and_body, is_waiting};
 use crate::app::TabState;
 use crate::checks::acme::{AcmeInfo, ChallengeHint};
+use crate::checks::tls::CertificateDetail;
 use crate::checks::CheckId;
 use crate::event::CheckUpdate;
 use crate::ui::theme;
@@ -50,21 +53,41 @@ pub fn render(frame: &mut Frame, area: Rect, tab: &TabState) {
             tls.alpn.clone().unwrap_or_else(|| "-".to_string()),
         ),
         ("Chain length".to_string(), tls.chain_len.to_string()),
-        (
+    ];
+
+    if let Some(leaf) = tls.chain.first() {
+        rows.extend(leaf_certificate_rows(leaf));
+    } else {
+        rows.push((
             "Subject".to_string(),
             tls.subject.clone().unwrap_or_else(|| "-".to_string()),
-        ),
-        (
+        ));
+        rows.push((
             "CA".to_string(),
             tls.acme
                 .as_ref()
                 .map(|a| a.authority.name())
                 .or_else(|| tls.issuer.clone())
                 .unwrap_or_else(|| "-".to_string()),
-        ),
-    ];
-    for san in &tls.sans {
-        rows.push(("SAN".to_string(), san.clone()));
+        ));
+        for san in &tls.sans {
+            rows.push(("SAN".to_string(), san.clone()));
+        }
+    }
+
+    for (i, cert) in tls.chain.iter().enumerate().skip(1) {
+        rows.push((
+            format!("Chain #{i}"),
+            format!(
+                "{} — issued by {}, expires {}, {} ({}-bit {})",
+                cert.subject,
+                cert.issuer,
+                format_unix_date(cert.not_after_unix),
+                cert.signature_algorithm,
+                cert.public_key_bits,
+                cert.public_key_algorithm,
+            ),
+        ));
     }
 
     let expiry_height = if tls.days_until_expiry.is_some() {
@@ -126,6 +149,97 @@ pub fn render(frame: &mut Frame, area: Rect, tab: &TabState) {
             inner,
         );
     }
+}
+
+fn format_unix_date(unix: i64) -> String {
+    chrono::DateTime::from_timestamp(unix, 0)
+        .map(|dt| dt.format("%Y-%m-%d %H:%M UTC").to_string())
+        .unwrap_or_else(|| unix.to_string())
+}
+
+/// Everything a "view certificate" dialog would show for one certificate,
+/// as kv_table rows -- used for the leaf (the only one shown in full;
+/// the rest of the chain gets one summary line each, see `Chain #N`).
+fn leaf_certificate_rows(cert: &CertificateDetail) -> Vec<(String, String)> {
+    let mut rows = vec![
+        ("Subject".to_string(), cert.subject.clone()),
+        (
+            "CA".to_string(),
+            if cert.is_self_signed {
+                format!("{} (self-signed)", cert.issuer)
+            } else {
+                cert.issuer.clone()
+            },
+        ),
+        ("Serial".to_string(), cert.serial_number.clone()),
+        ("X.509 version".to_string(), format!("v{}", cert.version)),
+        (
+            "Valid from".to_string(),
+            format_unix_date(cert.not_before_unix),
+        ),
+        (
+            "Valid until".to_string(),
+            format_unix_date(cert.not_after_unix),
+        ),
+        (
+            "Signature algo".to_string(),
+            cert.signature_algorithm.clone(),
+        ),
+        (
+            "Public key".to_string(),
+            format!(
+                "{} ({}-bit)",
+                cert.public_key_algorithm, cert.public_key_bits
+            ),
+        ),
+        (
+            "SHA-256 fingerprint".to_string(),
+            cert.sha256_fingerprint.clone(),
+        ),
+        (
+            "SHA-1 fingerprint".to_string(),
+            cert.sha1_fingerprint.clone(),
+        ),
+        (
+            "Is CA".to_string(),
+            match (cert.is_ca, cert.path_len_constraint) {
+                (true, Some(n)) => format!("yes (path length constraint: {n})"),
+                (true, None) => "yes".to_string(),
+                (false, _) => "no".to_string(),
+            },
+        ),
+    ];
+    if !cert.key_usage.is_empty() {
+        rows.push(("Key usage".to_string(), cert.key_usage.join(", ")));
+    }
+    if !cert.extended_key_usage.is_empty() {
+        rows.push((
+            "Extended key usage".to_string(),
+            cert.extended_key_usage.join(", "),
+        ));
+    }
+    if let Some(ski) = &cert.subject_key_identifier {
+        rows.push(("Subject key ID".to_string(), ski.clone()));
+    }
+    if let Some(aki) = &cert.authority_key_identifier {
+        rows.push(("Authority key ID".to_string(), aki.clone()));
+    }
+    for url in &cert.crl_distribution_points {
+        rows.push(("CRL".to_string(), url.clone()));
+    }
+    for url in &cert.ocsp_urls {
+        rows.push(("OCSP".to_string(), url.clone()));
+    }
+    for url in &cert.ca_issuers_urls {
+        rows.push(("CA Issuers".to_string(), url.clone()));
+    }
+    if cert.sct_count > 0 {
+        rows.push(("CT (embedded SCTs)".to_string(), cert.sct_count.to_string()));
+    }
+    for san in &cert.sans {
+        rows.push(("SAN".to_string(), san.clone()));
+    }
+    rows
 }
 
 fn label(text: &'static str) -> Span<'static> {

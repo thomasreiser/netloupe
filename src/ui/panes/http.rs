@@ -1,6 +1,7 @@
-//! HTTP pane: status, redirect chain, timing, security headers, the
-//! negotiated HTTP version, and dedicated plain-HTTP-on-port-80/h2c/
-//! HTTP/3 reachability probes.
+//! HTTP pane: status, redirect chain, timing, security headers, and a
+//! per-version support table (HTTP/1.1, HTTP/2 over TLS, h2c, HTTP/3),
+//! each from its own dedicated, protocol-forced probe rather than
+//! inferred from whichever one the main request happened to negotiate.
 
 use ratatui::layout::Rect;
 use ratatui::Frame;
@@ -41,19 +42,15 @@ pub fn render(frame: &mut Frame, area: Rect, tab: &TabState) {
         rows.push(("Final URL".to_string(), url.clone()));
     }
     if let Some(version) = &http.http_version {
-        // A real ALPN negotiation, not just "the only protocol this
-        // build speaks" -- so HTTP/1.1 here means the server genuinely
-        // didn't offer HTTP/2, not that we didn't ask.
-        rows.push(("Negotiated".to_string(), version.clone()));
+        // What a normal client's own ALPN negotiation happened to pick
+        // for the request above -- NOT the same question as "which
+        // versions does this server support" (the versions table below):
+        // a server offering both HTTP/2 and HTTP/3 will still show
+        // "HTTP/2" here, since ALPN-over-TCP has no way to advertise
+        // QUIC support at all, and this is only ever one connection's
+        // outcome, not a survey.
+        rows.push(("This request".to_string(), version.clone()));
     }
-    rows.push((
-        "HTTP/3".to_string(),
-        if http.http3_supported {
-            "supported — a QUIC-only request to the same host/port succeeded".to_string()
-        } else {
-            "not offered (or the QUIC connection was blocked/unreachable)".to_string()
-        },
-    ));
     if let Some(timing) = http.timing {
         rows.push(("Timing".to_string(), format!("{}ms", timing.as_millis())));
     }
@@ -79,15 +76,24 @@ pub fn render(frame: &mut Frame, area: Rect, tab: &TabState) {
             )
         };
         rows.push(("HTTP (port 80)".to_string(), value));
-        rows.push((
-            "h2c".to_string(),
-            if plain.h2c_supported {
-                "supported — accepted HTTP/2 over cleartext via prior knowledge".to_string()
-            } else {
-                "not supported (or not offered without TLS)".to_string()
-            },
-        ));
     }
+
+    // Each row here comes from its own dedicated, protocol-forced
+    // connection attempt (see `checks::http::probe_forced`), so this is
+    // a real per-version yes/no, not an inference from whichever one
+    // "This request" above happened to land on.
+    let v = &http.versions;
+    let supported = |ok: bool| {
+        if ok {
+            "✓ supported".to_string()
+        } else {
+            "✗ not supported".to_string()
+        }
+    };
+    rows.push(("HTTP/1.1 (TLS)".to_string(), supported(v.http1_tls)));
+    rows.push(("HTTP/2 (TLS)".to_string(), supported(v.http2_tls)));
+    rows.push(("HTTP/2 (h2c)".to_string(), supported(v.h2c)));
+    rows.push(("HTTP/3 (QUIC)".to_string(), supported(v.http3)));
 
     let sec = &http.security_headers;
     rows.push((
