@@ -20,6 +20,7 @@ pub mod ports;
 pub mod reputation;
 pub mod tls;
 pub mod trace;
+pub mod zonewalk;
 
 use std::sync::Arc;
 
@@ -49,11 +50,14 @@ pub enum CheckId {
     /// Alternative-hostname discovery (PTR/cert-SAN/CT-log/reverse-IP);
     /// feeds the Overview pane's summary, not a pane of its own.
     AltNames,
+    /// Full NSEC zone walk; opt-in, offered from the DNS pane. See
+    /// `checks::zonewalk`.
+    ZoneWalk,
 }
 
 impl CheckId {
     /// Every check, in the pane display order from `CLAUDE.md`.
-    pub const ALL: [CheckId; 12] = [
+    pub const ALL: [CheckId; 13] = [
         CheckId::Dns,
         CheckId::Mail,
         CheckId::Ping,
@@ -66,6 +70,7 @@ impl CheckId {
         CheckId::Geo,
         CheckId::Reputation,
         CheckId::AltNames,
+        CheckId::ZoneWalk,
     ];
 
     pub fn label(self) -> &'static str {
@@ -82,13 +87,14 @@ impl CheckId {
             CheckId::Geo => "Geo",
             CheckId::Reputation => "Rep",
             CheckId::AltNames => "Alt. names",
+            CheckId::ZoneWalk => "Zone walk",
         }
     }
 
     /// True for checks that are opt-in and must not run automatically when
     /// a tab is opened (see `CLAUDE.md`'s Safety and ethics section).
     pub fn requires_opt_in(self) -> bool {
-        matches!(self, CheckId::Ports)
+        matches!(self, CheckId::Ports | CheckId::ZoneWalk)
     }
 }
 
@@ -391,6 +397,18 @@ impl Check for AltNamesCheck {
     }
 }
 
+struct ZoneWalkCheck;
+
+#[async_trait]
+impl Check for ZoneWalkCheck {
+    fn id(&self) -> CheckId {
+        CheckId::ZoneWalk
+    }
+    async fn run(&self, ctx: CheckContext, tx: mpsc::Sender<CheckEvent>) {
+        zonewalk::run(ctx, tx).await
+    }
+}
+
 /// Every check netloupe knows about. `app.rs` spawns one from this list per
 /// tab for every check that isn't [`CheckId::requires_opt_in`]; opt-in
 /// checks are spawned only after the user confirms.
@@ -408,5 +426,6 @@ pub fn registry() -> Vec<Box<dyn Check>> {
         Box::new(GeoCheck),
         Box::new(ReputationCheck),
         Box::new(AltNamesCheck),
+        Box::new(ZoneWalkCheck),
     ]
 }

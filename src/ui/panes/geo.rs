@@ -65,7 +65,7 @@ pub fn render(frame: &mut Frame, area: Rect, tab: &TabState) {
             ratatui::layout::Constraint::Length(geo.errors.len().min(4) as u16),
         ])
         .split(body);
-    frame.render_widget(crate::ui::widgets::kv_table::widget(&rows), chunks[0]);
+    crate::ui::widgets::kv_table::render(frame, chunks[0], &rows, tab.scroll);
     if !geo.errors.is_empty() {
         frame.render_widget(super::errors_widget(&geo.errors), chunks[1]);
     }

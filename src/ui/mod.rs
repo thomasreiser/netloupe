@@ -62,6 +62,7 @@ pub fn draw(frame: &mut Frame, state: &AppState) {
         Mode::NewHostPrompt(buf) => render_prompt(frame, area, buf),
         Mode::Help => render_help(frame, area),
         Mode::ConfirmPorts => render_confirm_ports(frame, area),
+        Mode::ConfirmZoneWalk => render_confirm_zone_walk(frame, area, state),
         Mode::SelectAltName { names, selected } => {
             render_select_alt_name(frame, area, names, *selected)
         }
@@ -94,6 +95,9 @@ fn render_status_line(frame: &mut Frame, area: Rect, state: &AppState) {
         key("←/→"),
         desc(" pane "),
         sep(),
+        key("↑/↓"),
+        desc(" scroll "),
+        sep(),
         key("r"),
         desc(" rerun "),
         sep(),
@@ -105,6 +109,9 @@ fn render_status_line(frame: &mut Frame, area: Rect, state: &AppState) {
         sep(),
         key("a"),
         desc(" alt. hosts "),
+        sep(),
+        key("w"),
+        desc(" zone walk "),
         sep(),
         key("q"),
         desc(" quit"),
@@ -200,6 +207,54 @@ fn render_confirm_ports(frame: &mut Frame, area: Rect) {
     frame.render_widget(text, inner);
 }
 
+fn render_confirm_zone_walk(frame: &mut Frame, area: Rect, state: &AppState) {
+    let popup = centered_rect(62, 32, area);
+    frame.render_widget(Clear, popup);
+    let block = theme::panel("⚠ NSEC zone walk", theme::ORANGE);
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    let target = state
+        .active()
+        .map(|t| t.target.display())
+        .unwrap_or_default();
+    let text = Paragraph::new(vec![
+        Line::from(Span::styled(
+            format!("{target}'s zone is NSEC-signed, which means its whole set of"),
+            Style::default().fg(theme::TEXT),
+        )),
+        Line::from(Span::styled(
+            "names can be enumerated by following the DNSSEC chain.",
+            Style::default().fg(theme::TEXT),
+        )),
+        Line::from(Span::styled(
+            "This sends many (rate-limited, capped) queries to their nameservers —",
+            Style::default().fg(theme::MUTED),
+        )),
+        Line::from(Span::styled(
+            "only do this against zones you're authorized to probe.",
+            Style::default().fg(theme::MUTED),
+        )),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("Walk the zone now?  ", Style::default().fg(theme::TEXT)),
+            Span::styled(
+                "[y]",
+                Style::default()
+                    .fg(theme::GREEN)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" / "),
+            Span::styled(
+                "[N]",
+                Style::default().fg(theme::RED).add_modifier(Modifier::BOLD),
+            ),
+        ]),
+    ])
+    .wrap(Wrap { trim: true });
+    frame.render_widget(text, inner);
+}
+
 fn render_select_alt_name(
     frame: &mut Frame,
     area: Rect,
@@ -266,10 +321,12 @@ fn render_help(frame: &mut Frame, area: Rect) {
         row("Ctrl+t / Ctrl+w", "New tab / close tab"),
         row("Tab / Shift+Tab", "Next / previous host tab"),
         row("1-9, 0, -, ←/→", "Switch pane"),
+        row("↑/↓, PgUp/PgDn", "Scroll the current pane's content"),
         row("r", "Re-run checks for the current pane"),
         row("R", "Re-run all checks for the current host"),
         row("e", "Toggle evidence details (Hosting pane)"),
         row("a", "Open the alternative-hostname picker (Overview)"),
+        row("w", "Walk an NSEC-signed zone for its full name list (DNS)"),
         row("y", "Copy the current pane as text"),
         row("?", "Help overlay"),
         row("q", "Quit"),
@@ -308,6 +365,8 @@ mod tests {
             shared: SharedResultsHandle::new(),
             checks: BTreeMap::new(),
             ports_confirmed: None,
+            zone_walk_confirmed: None,
+            scroll: 0,
         }
     }
 

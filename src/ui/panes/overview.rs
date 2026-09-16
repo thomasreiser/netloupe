@@ -350,11 +350,9 @@ fn render_alt_names(frame: &mut Frame, area: Rect, tab: &TabState) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let max_rows = inner.height as usize;
     let lines: Vec<Line> = alt
         .names
         .iter()
-        .take(max_rows)
         .map(|n| {
             let sources = n
                 .sources
@@ -368,5 +366,5 @@ fn render_alt_names(frame: &mut Frame, area: Rect, tab: &TabState) {
             ])
         })
         .collect();
-    frame.render_widget(Paragraph::new(lines), inner);
+    frame.render_widget(Paragraph::new(lines).scroll((tab.scroll, 0)), inner);
 }

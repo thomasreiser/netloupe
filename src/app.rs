@@ -129,6 +129,14 @@ pub struct TabState {
     /// Ports scanning needs an explicit yes before it ever runs (safety:
     /// see `CLAUDE.md`). `None` = not asked yet this tab.
     pub ports_confirmed: Option<bool>,
+    /// Same idea for the NSEC zone walk (`checks::zonewalk`): `None` = not
+    /// asked yet this tab.
+    pub zone_walk_confirmed: Option<bool>,
+    /// How far the active pane's content is scrolled down, in lines/rows.
+    /// Per-tab rather than per-pane: resets to 0 whenever the active pane
+    /// changes, since a stale scroll position from a different pane's
+    /// (differently shaped) content would be meaningless.
+    pub scroll: u16,
 }
 
 impl TabState {
@@ -147,6 +155,8 @@ pub enum Mode {
     Help,
     /// Asking whether to run the opt-in port scan for the active tab.
     ConfirmPorts,
+    /// Asking whether to run the opt-in NSEC zone walk for the active tab.
+    ConfirmZoneWalk,
     /// Browsing the active tab's discovered alternative hostnames
     /// (`CheckId::AltNames`); Enter opens a new tab for the selected one.
     SelectAltName {
@@ -200,11 +210,13 @@ impl AppState {
             shared: shared.clone(),
             checks: BTreeMap::new(),
             ports_confirmed: None,
+            zone_walk_confirmed: None,
+            scroll: 0,
         };
         self.tabs.push(tab);
         self.active_tab = self.tabs.len() - 1;
 
-        self.spawn_checks(id, target, cancel, shared, sender.clone(), false);
+        self.spawn_checks(id, target, cancel, shared, sender.clone(), &[]);
     }
 
     fn spawn_checks(
@@ -214,10 +226,10 @@ impl AppState {
         cancel: CancellationToken,
         shared: SharedResultsHandle,
         sender: mpsc::Sender<CheckEvent>,
-        include_opt_in: bool,
+        confirmed_opt_ins: &[CheckId],
     ) {
         for check in checks::registry() {
-            if check.id().requires_opt_in() && !include_opt_in {
+            if check.id().requires_opt_in() && !confirmed_opt_ins.contains(&check.id()) {
                 continue;
             }
             let ctx = CheckContext {
@@ -270,14 +282,20 @@ impl AppState {
         let target = tab.target.clone();
         let cancel = tab.cancel.clone();
         let shared = tab.shared.clone();
-        let include_ports = tab.ports_confirmed == Some(true);
+        let mut confirmed_opt_ins = Vec::new();
+        if tab.ports_confirmed == Some(true) {
+            confirmed_opt_ins.push(CheckId::Ports);
+        }
+        if tab.zone_walk_confirmed == Some(true) {
+            confirmed_opt_ins.push(CheckId::ZoneWalk);
+        }
         self.spawn_checks(
             tab_id,
             target,
             cancel,
             shared,
             sender.clone(),
-            include_ports,
+            &confirmed_opt_ins,
         );
     }
 
@@ -319,6 +337,28 @@ impl AppState {
         let shared = tab.shared.clone();
         self.spawn_one_check(
             CheckId::Ports,
+            tab_id,
+            target,
+            cancel,
+            shared,
+            sender.clone(),
+        );
+    }
+
+    pub fn confirm_zone_walk(&mut self, confirmed: bool, sender: &mpsc::Sender<CheckEvent>) {
+        let Some(tab) = self.tabs.get_mut(self.active_tab) else {
+            return;
+        };
+        tab.zone_walk_confirmed = Some(confirmed);
+        if !confirmed {
+            return;
+        }
+        let tab_id = tab.id;
+        let target = tab.target.clone();
+        let cancel = tab.cancel.clone();
+        let shared = tab.shared.clone();
+        self.spawn_one_check(
+            CheckId::ZoneWalk,
             tab_id,
             target,
             cancel,
@@ -387,6 +427,15 @@ impl AppState {
                 self.mode = Mode::Normal;
                 self.confirm_ports(false, sender);
             }
+            (Mode::ConfirmZoneWalk, Action::InputChar('y')) => {
+                self.mode = Mode::Normal;
+                self.confirm_zone_walk(true, sender);
+            }
+            (Mode::ConfirmZoneWalk, Action::InputChar('n'))
+            | (Mode::ConfirmZoneWalk, Action::InputCancel) => {
+                self.mode = Mode::Normal;
+                self.confirm_zone_walk(false, sender);
+            }
             (Mode::SelectAltName { selected, .. }, Action::SelectUp) => {
                 *selected = selected.saturating_sub(1);
             }
@@ -418,17 +467,20 @@ impl AppState {
             Action::NextTab => {
                 if !self.tabs.is_empty() {
                     self.active_tab = (self.active_tab + 1) % self.tabs.len();
+                    self.reset_scroll();
                 }
             }
             Action::PrevTab => {
                 if !self.tabs.is_empty() {
                     self.active_tab = (self.active_tab + self.tabs.len() - 1) % self.tabs.len();
+                    self.reset_scroll();
                 }
             }
             Action::SelectPane(i) => {
                 if let Some(tab) = self.tabs.get_mut(self.active_tab) {
                     if i < Pane::ALL.len() {
                         tab.active_pane = i;
+                        tab.scroll = 0;
                         self.maybe_prompt_ports();
                     }
                 }
@@ -436,15 +488,21 @@ impl AppState {
             Action::NextPane => {
                 if let Some(tab) = self.tabs.get_mut(self.active_tab) {
                     tab.active_pane = (tab.active_pane + 1) % Pane::ALL.len();
+                    tab.scroll = 0;
                 }
                 self.maybe_prompt_ports();
             }
             Action::PrevPane => {
                 if let Some(tab) = self.tabs.get_mut(self.active_tab) {
                     tab.active_pane = (tab.active_pane + Pane::ALL.len() - 1) % Pane::ALL.len();
+                    tab.scroll = 0;
                 }
                 self.maybe_prompt_ports();
             }
+            Action::ScrollUp => self.scroll_by(-1),
+            Action::ScrollDown => self.scroll_by(1),
+            Action::ScrollPageUp => self.scroll_by(-10),
+            Action::ScrollPageDown => self.scroll_by(10),
             Action::RerunPane => {
                 if self.current_pane() == Some(Pane::Ports) {
                     self.maybe_prompt_ports();
@@ -460,6 +518,7 @@ impl AppState {
             }
             Action::ToggleHelp => self.mode = Mode::Help,
             Action::OpenAltNames => self.open_alt_names_picker(),
+            Action::OpenZoneWalk => self.open_zone_walk_confirm(),
             Action::CopyPane => {} // clipboard support is a later addition; no-op for now.
             _ => {}
         }
@@ -482,8 +541,41 @@ impl AppState {
         };
     }
 
+    /// Asks whether to run the opt-in NSEC zone walk, if the DNS check has
+    /// found this zone to actually be NSEC-signed (the only case it's
+    /// possible) and hasn't already been asked this tab. A no-op
+    /// otherwise: nothing to walk, or already answered.
+    fn open_zone_walk_confirm(&mut self) {
+        let Some(tab) = self.active() else { return };
+        if tab.zone_walk_confirmed.is_some() {
+            return;
+        }
+        let is_walkable = matches!(&tab.slot(CheckId::Dns).update, Some(CheckUpdate::Dns(d)) if d.zone_signing == crate::checks::dns::ZoneSigning::Nsec);
+        if !is_walkable {
+            return;
+        }
+        self.mode = Mode::ConfirmZoneWalk;
+    }
+
     fn current_pane(&self) -> Option<Pane> {
         self.active().and_then(|t| Pane::from_index(t.active_pane))
+    }
+
+    fn reset_scroll(&mut self) {
+        if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+            tab.scroll = 0;
+        }
+    }
+
+    /// Scrolls the active pane's content by `delta` lines/rows (negative
+    /// scrolls up). Never goes negative; there's no upper clamp since the
+    /// actual content height isn't known outside rendering (rule 1: pure
+    /// rendering can't write back into `AppState`) — scrolling past the
+    /// end of a pane's content just shows blank space, which is harmless.
+    fn scroll_by(&mut self, delta: i32) {
+        if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+            tab.scroll = (i32::from(tab.scroll) + delta).max(0) as u16;
+        }
     }
 
     /// Switching to the Ports pane for the first time this tab asks for
@@ -516,7 +608,7 @@ fn decode_key(mode: &Mode, key: crossterm::event::KeyEvent) -> Action {
             KeyCode::Esc => Action::InputCancel,
             _ => Action::None,
         },
-        Mode::ConfirmPorts => match key.code {
+        Mode::ConfirmPorts | Mode::ConfirmZoneWalk => match key.code {
             KeyCode::Char(c) => Action::InputChar(c),
             KeyCode::Esc => Action::InputCancel,
             _ => Action::None,
@@ -554,6 +646,10 @@ fn decode_normal_key(key: crossterm::event::KeyEvent) -> Action {
         KeyCode::BackTab => Action::PrevTab,
         KeyCode::Left => Action::PrevPane,
         KeyCode::Right => Action::NextPane,
+        KeyCode::Up => Action::ScrollUp,
+        KeyCode::Down => Action::ScrollDown,
+        KeyCode::PageUp => Action::ScrollPageUp,
+        KeyCode::PageDown => Action::ScrollPageDown,
         KeyCode::Char('1') => Action::SelectPane(0),
         KeyCode::Char('2') => Action::SelectPane(1),
         KeyCode::Char('3') => Action::SelectPane(2),
@@ -569,6 +665,7 @@ fn decode_normal_key(key: crossterm::event::KeyEvent) -> Action {
         KeyCode::Char('R') => Action::RerunAll,
         KeyCode::Char('e') => Action::ToggleEvidence,
         KeyCode::Char('a') => Action::OpenAltNames,
+        KeyCode::Char('w') => Action::OpenZoneWalk,
         KeyCode::Char('y') => Action::CopyPane,
         KeyCode::Char('?') => Action::ToggleHelp,
         KeyCode::Char('q') => Action::Quit,

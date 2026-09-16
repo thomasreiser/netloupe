@@ -4,7 +4,7 @@
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{List, ListItem};
+use ratatui::widgets::{List, ListItem, ListState};
 use ratatui::Frame;
 
 use super::{empty_message, header_and_body};
@@ -104,7 +104,9 @@ pub fn render(frame: &mut Frame, area: Rect, tab: &TabState) {
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(0), Constraint::Length(1)])
         .split(body);
-    frame.render_widget(List::new(items), chunks[0]);
+    let max_offset = items.len().saturating_sub(1);
+    let mut list_state = ListState::default().with_offset((tab.scroll as usize).min(max_offset));
+    frame.render_stateful_widget(List::new(items), chunks[0], &mut list_state);
     frame.render_widget(empty_message(hint), chunks[1]);
 }
 
