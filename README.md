@@ -31,11 +31,13 @@ Hosting-provider detection works offline out of the box (a snapshot of
 every provider's IP ranges ships in the binary); `update-data` refreshes
 the cache with the latest lists.
 
-GeoIP lookups need your own MaxMind GeoLite2 `.mmdb` files (not
-redistributable, so none are bundled) — point `[geoip].city_db` /
-`asn_db` at them in the config file. Everything else works with no setup
-and no API keys; reputation lookups use public DNSBLs and the Tor exit
-list, with AbuseIPDB as an optional extra if you configure a key.
+GeoIP lookups need a MaxMind account: set `[geoip].account_id` /
+`license_key` in the config file (or via the in-app settings editor, `s`)
+and netloupe downloads the GeoLite2 City/ASN databases itself, refreshing
+them on `[geoip].update_interval` (default 1 day). Everything else works
+with no setup and no API keys; reputation lookups use public DNSBLs and
+the Tor exit list, with AbuseIPDB as an optional extra if you configure a
+key.
 
 Config lives at `$XDG_CONFIG_HOME/netloupe/config.toml` (all optional —
 see `Config` in `src/config.rs` for every field and its default).

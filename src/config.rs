@@ -147,12 +147,49 @@ impl Default for PortConfig {
     }
 }
 
-/// Paths to user-supplied GeoLite2 databases. Never committed to the repo.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+/// MaxMind GeoLite2 access. The databases themselves aren't redistributable,
+/// so rather than a local path, this holds the credentials `crate::geoip`'s
+/// background updater needs to download them itself into a per-user cache
+/// (see `crate::geoip::cache_dir`); `checks::geo` only ever reads whatever
+/// ends up there.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct GeoIpConfig {
-    pub city_db: Option<PathBuf>,
-    pub asn_db: Option<PathBuf>,
+    /// The numeric account ID from a MaxMind account's license-key page
+    /// (not the license key itself).
+    pub account_id: Option<u32>,
+    /// Generated alongside the account ID. Like the reputation API keys
+    /// below, only ever read from config or the settings editor, never
+    /// logged.
+    pub license_key: Option<String>,
+    /// How often to refresh the downloaded databases. Checked
+    /// opportunistically on a timer while the TUI is open, not pinned to
+    /// a wall-clock schedule.
+    #[serde(with = "humantime_serde")]
+    pub update_interval: Duration,
+}
+
+impl Default for GeoIpConfig {
+    fn default() -> Self {
+        Self {
+            account_id: None,
+            license_key: None,
+            update_interval: Duration::from_secs(24 * 3600),
+        }
+    }
+}
+
+impl GeoIpConfig {
+    /// Both credentials present and non-empty, ready to use for a
+    /// download. `None` means "not configured" -- the background updater
+    /// and `checks::geo`'s messaging both key off this rather than
+    /// checking the two fields separately everywhere.
+    pub fn credentials(&self) -> Option<(u32, String)> {
+        match (self.account_id, &self.license_key) {
+            (Some(id), Some(key)) if !key.trim().is_empty() => Some((id, key.clone())),
+            _ => None,
+        }
+    }
 }
 
 /// Settings for the hosting-provider detection engine.
@@ -277,6 +314,22 @@ mod tests {
         assert_eq!(c.resolvers.comparison.len(), 3);
         assert!(!c.ports.scan_list.is_empty());
         assert_eq!(c.theme, "default");
+        assert_eq!(c.geoip.update_interval, Duration::from_secs(24 * 3600));
+    }
+
+    #[test]
+    fn geoip_credentials_need_both_fields_present_and_a_non_blank_key() {
+        let mut c = GeoIpConfig::default();
+        assert!(c.credentials().is_none());
+        c.account_id = Some(12345);
+        assert!(c.credentials().is_none(), "license key still missing");
+        c.license_key = Some("  ".to_string());
+        assert!(
+            c.credentials().is_none(),
+            "blank license key shouldn't count"
+        );
+        c.license_key = Some("abc123".to_string());
+        assert_eq!(c.credentials(), Some((12345, "abc123".to_string())));
     }
 
     #[test]
