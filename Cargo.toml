@@ -44,6 +44,8 @@ tokio-rustls = { version = "0.26", default-features = false, features = ["ring",
 rustls-pki-types = "1"
 webpki-roots = "1"
 x509-parser = "0.18"
+sha1 = "0.10"
+sha2 = "0.10"
 
 # HTTP. `http2` lets reqwest actually negotiate HTTP/2 via ALPN over TLS
 # (without it, every response reports HTTP/1.1 regardless of what the
