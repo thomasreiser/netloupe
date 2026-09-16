@@ -27,6 +27,14 @@ pub enum ConfigError {
         #[source]
         source: Box<toml::de::Error>,
     },
+    #[error("failed to write {path}: {source}")]
+    Write {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("failed to serialize configuration: {0}")]
+    Serialize(#[source] toml::ser::Error),
 }
 
 /// Top-level configuration, deserialized from TOML.
@@ -221,6 +229,24 @@ impl Config {
             source: Box::new(source),
         })
     }
+
+    /// Serializes and writes this config to `path`, creating its parent
+    /// directory if needed (a first-run user won't have one yet). Used by
+    /// the in-app settings editor so a field edit persists across
+    /// restarts, not just for the current session.
+    pub fn save(&self, path: &Path) -> Result<(), ConfigError> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|source| ConfigError::Write {
+                path: path.to_path_buf(),
+                source,
+            })?;
+        }
+        let text = toml::to_string_pretty(self).map_err(ConfigError::Serialize)?;
+        std::fs::write(path, text).map_err(|source| ConfigError::Write {
+            path: path.to_path_buf(),
+            source,
+        })
+    }
 }
 
 /// Minimal `humantime` (de)serialization for `Duration` fields, e.g. "3s",
@@ -276,5 +302,30 @@ mod tests {
     fn parses_empty_toml_as_defaults() {
         let c: Config = toml::from_str("").unwrap();
         assert_eq!(c.resolvers.comparison.len(), 3);
+    }
+
+    #[test]
+    fn save_then_load_round_trips_a_modified_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nested").join("config.toml");
+
+        let c = Config {
+            theme: "solarized".to_string(),
+            timeouts: TimeoutConfig {
+                dns: Duration::from_secs(9),
+                ..Default::default()
+            },
+            ports: PortConfig {
+                scan_list: vec![80, 443],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        c.save(&path).unwrap();
+
+        let loaded = Config::load(&path).unwrap();
+        assert_eq!(loaded.theme, "solarized");
+        assert_eq!(loaded.timeouts.dns, Duration::from_secs(9));
+        assert_eq!(loaded.ports.scan_list, vec![80, 443]);
     }
 }

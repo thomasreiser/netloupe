@@ -9,5 +9,6 @@ pub mod checks;
 pub mod config;
 pub mod event;
 pub mod providers;
+pub mod settings;
 pub mod target;
 pub mod ui;

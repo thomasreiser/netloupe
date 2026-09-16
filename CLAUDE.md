@@ -290,6 +290,7 @@ Before finishing any task, run `cargo fmt`, `cargo clippy` (with no warnings), a
 Config lives at `$XDG_CONFIG_HOME/netloupe/config.toml`. Every option has a sensible default so the tool runs with no config file at all. It covers:
 - resolvers to use (the system resolver by default, plus a comparison set: 1.1.1.1, 8.8.8.8, 9.9.9.9)
 - **Per-tab custom DNS server.** Opening a new host (`Ctrl+t`, or selecting an alternative hostname) always asks which DNS server to query, pre-filled with the last one chosen this session so repeating it is just Enter; blank means the system's normal resolver. Every check that resolves names for that tab (not just the DNS pane) queries that server, threaded through `checks::dns::DnsOpts`. `check <target> --resolver <ip>` is the headless equivalent.
+- **In-app settings editor** (`s`, see `src/settings.rs`): a curated list of the fields someone would actually reach for interactively (GeoLite2 DB paths, the extra signature directory, timeouts, the port scan list, comparison resolvers, API keys, theme) -- not every `Config` field. `↑`/`↓` selects, Enter edits (pre-filled with the current value) and commits, Esc cancels an edit or closes the editor. A committed field applies to `AppState::config` immediately (new checks pick it up; already-running ones keep whatever they started with) and is written back to `config.toml` right away, so there's no separate unsaved draft to lose.
 - timeouts per check type
 - the port list for scans
 - paths to the GeoLite2 `.mmdb` files
@@ -310,6 +311,7 @@ Config lives at `$XDG_CONFIG_HOME/netloupe/config.toml`. Every option has a sens
 | `e` | Toggle evidence details (Hosting pane) |
 | `a` | Open the alternative-hostname picker (Overview) |
 | `w` | Walk an NSEC-signed zone for its full name list (DNS) |
+| `s` | Open the settings editor |
 | `y` | Copy the current pane as text |
 | `?` | Help overlay |
 | `q` | Quit |

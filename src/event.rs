@@ -29,6 +29,10 @@ pub enum Action {
     OpenAltNames,
     /// Asks whether to run the opt-in NSEC zone walk for the active tab.
     OpenZoneWalk,
+    /// Opens the in-app settings editor.
+    OpenSettings,
+    /// Pauses/resumes the active tab's continuous ping (Ping/Trace pane).
+    TogglePingPause,
     /// Moves the picker's selection up/down (also usable by any future
     /// selectable-list mode).
     SelectUp,
