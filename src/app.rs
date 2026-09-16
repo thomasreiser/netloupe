@@ -494,6 +494,15 @@ impl AppState {
                 self.mode = Mode::Normal;
                 self.confirm_zone_walk(false, sender);
             }
+            // Anything else (pane/tab navigation, rerun, ...) while a
+            // confirm prompt is up: dismiss it without recording a
+            // decision -- it comes back next time the Ports pane (or the
+            // zone-walk hint) is reached -- and let the action through
+            // rather than trapping the user until they answer y/n.
+            (Mode::ConfirmPorts | Mode::ConfirmZoneWalk, action) => {
+                self.mode = Mode::Normal;
+                self.handle_normal_action(action, sender);
+            }
             (Mode::SelectAltName { selected, .. }, Action::SelectUp) => {
                 *selected = selected.saturating_sub(1);
             }
@@ -703,10 +712,18 @@ fn decode_key(mode: &Mode, key: crossterm::event::KeyEvent) -> Action {
             KeyCode::Esc => Action::InputCancel,
             _ => Action::None,
         },
+        // 'y'/'n' answer the prompt; Esc explicitly declines (same as
+        // 'n'). Anything else -- pane/tab navigation in particular --
+        // falls through to its normal-mode meaning rather than being
+        // swallowed, so arriving at the Ports pane doesn't trap the user
+        // until they answer: they can keep tabbing away, and the prompt
+        // just comes back next time they land on Ports (or the zone-walk
+        // hint fires again), since navigating away doesn't record a
+        // decision either way.
         Mode::ConfirmPorts | Mode::ConfirmZoneWalk => match key.code {
-            KeyCode::Char(c) => Action::InputChar(c),
+            KeyCode::Char(c @ ('y' | 'n')) => Action::InputChar(c),
             KeyCode::Esc => Action::InputCancel,
-            _ => Action::None,
+            _ => decode_normal_key(key),
         },
         Mode::Help => match key.code {
             KeyCode::Char('?') => Action::ToggleHelp,
@@ -1077,5 +1094,30 @@ mod tests {
             panic!("expected ChooseResolver mode, got a different mode");
         };
         assert_eq!(input, "");
+    }
+
+    /// Landing on the Ports pane puts up the confirm prompt, but it must
+    /// not trap navigation: switching panes away from it should still
+    /// work without answering y/n first, dismissing the prompt (not
+    /// recording a decision) rather than swallowing the keypress.
+    #[tokio::test]
+    async fn navigating_away_dismisses_the_ports_prompt_without_deciding() {
+        let mut state = AppState::new(Config::default(), ProviderDb::default());
+        let tx = test_sender();
+        state.open_tab(local_target(), None, &tx);
+
+        let ports_index = Pane::ALL.iter().position(|&p| p == Pane::Ports).unwrap();
+        state.handle_action(Action::SelectPane(ports_index), &tx);
+        assert!(matches!(state.mode, Mode::ConfirmPorts));
+        assert_eq!(state.tabs[0].active_pane, ports_index);
+
+        state.handle_action(Action::NextPane, &tx);
+
+        assert!(matches!(state.mode, Mode::Normal));
+        assert_eq!(state.tabs[0].active_pane, ports_index + 1);
+        assert_eq!(
+            state.tabs[0].ports_confirmed, None,
+            "navigating away shouldn't record a yes/no decision"
+        );
     }
 }
