@@ -4,12 +4,13 @@
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::Paragraph;
+use ratatui::widgets::{Cell, Paragraph, Row, Table, Wrap};
 use ratatui::Frame;
 
-use super::{empty_message, header_and_body, is_waiting};
-use crate::app::TabState;
+use super::{empty_message, errors_widget, header_and_body, is_waiting};
+use crate::app::{CheckStatus, TabState};
 use crate::checks::ping::PingMethod;
+use crate::checks::trace::{TraceMethod, TraceUpdate};
 use crate::checks::CheckId;
 use crate::event::CheckUpdate;
 use crate::ui::theme;
@@ -136,10 +137,129 @@ fn render_sparkline(frame: &mut Frame, area: Rect, tab: &TabState) {
 
 fn render_trace(frame: &mut Frame, area: Rect, tab: &TabState) {
     let slot = tab.slot(CheckId::Trace);
-    match &slot.status {
-        crate::app::CheckStatus::Failed(message) => {
-            frame.render_widget(super::errors_widget(std::slice::from_ref(message)), area)
-        }
-        _ => frame.render_widget(empty_message("traceroute: not implemented yet"), area),
+    if let CheckStatus::Failed(message) = &slot.status {
+        frame.render_widget(errors_widget(std::slice::from_ref(message)), area);
+        return;
     }
+
+    let Some(CheckUpdate::Trace(trace)) = &slot.update else {
+        frame.render_widget(
+            empty_message(if is_waiting(&slot.status) {
+                "tracing route..."
+            } else {
+                "no traceroute data"
+            }),
+            area,
+        );
+        return;
+    };
+
+    let reason_height = if trace.fallback_reason.is_some() {
+        3
+    } else {
+        0
+    };
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Length(reason_height),
+            Constraint::Min(0),
+        ])
+        .split(area);
+
+    render_trace_summary(frame, chunks[0], trace);
+    if let Some(reason) = &trace.fallback_reason {
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                format!("· {reason}"),
+                Style::default().fg(theme::gradient(0.5)),
+            )))
+            .wrap(Wrap { trim: true }),
+            chunks[1],
+        );
+    }
+    render_hop_table(frame, chunks[2], trace);
+}
+
+fn render_trace_summary(frame: &mut Frame, area: Rect, trace: &TraceUpdate) {
+    let method = match trace.method {
+        TraceMethod::Icmp => "ICMP".to_string(),
+        TraceMethod::TcpConnect { port } => {
+            format!("TCP connect (port {port}, fallback — no hop addresses)")
+        }
+    };
+    let status = if trace.reached {
+        "reached"
+    } else if trace.hops.len() >= crate::checks::trace::MAX_HOPS as usize {
+        "gave up (max hops)"
+    } else {
+        "running"
+    };
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                "Method  ",
+                Style::default()
+                    .fg(theme::LABEL)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(method, Style::default().fg(theme::TEXT)),
+            Span::styled("   ", Style::default()),
+            Span::styled(status, Style::default().fg(theme::MUTED)),
+        ])),
+        area,
+    );
+}
+
+fn render_hop_table(frame: &mut Frame, area: Rect, trace: &TraceUpdate) {
+    if trace.hops.is_empty() {
+        frame.render_widget(empty_message("tracing route..."), area);
+        return;
+    }
+
+    let rows: Vec<Row> = trace
+        .hops
+        .iter()
+        .map(|hop| {
+            let addr = hop
+                .addr
+                .map(|a| a.to_string())
+                .unwrap_or_else(|| "*".to_string());
+            let rtt = hop
+                .rtt
+                .map(|d| format!("{}ms", d.as_millis()))
+                .unwrap_or_else(|| "-".to_string());
+            let provider = hop.provider.clone().unwrap_or_default();
+            Row::new(vec![
+                Cell::from(hop.ttl.to_string()).style(Style::default().fg(theme::LABEL)),
+                Cell::from(addr).style(Style::default().fg(if hop.addr.is_some() {
+                    theme::TEXT
+                } else {
+                    theme::MUTED
+                })),
+                Cell::from(rtt).style(Style::default().fg(rtt_color(hop.rtt))),
+                Cell::from(provider).style(Style::default().fg(theme::MUTED)),
+            ])
+        })
+        .collect();
+
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Length(4),
+            Constraint::Length(40),
+            Constraint::Length(8),
+            Constraint::Fill(1),
+        ],
+    )
+    .header(
+        Row::new(vec!["TTL", "Address", "RTT", "Provider"]).style(
+            Style::default()
+                .fg(theme::LABEL)
+                .add_modifier(Modifier::BOLD),
+        ),
+    );
+
+    frame.render_widget(table, area);
 }

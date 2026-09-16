@@ -322,7 +322,7 @@ Config lives at `$XDG_CONFIG_HOME/netloupe/config.toml`. Every option has a sens
 1. **MVP:** tabs, target parsing, DNS pane, ICMP/TCP ping, Overview
 2. IP/ASN + RDAP, Geo (GeoLite2), **Hosting (ranges + ASN + CNAME + NS)**
 3. HTTP + TLS panes, with header/cert signals feeding Hosting
-4. Mail pane, traceroute with per-hop provider badges
+4. Mail pane
 5. Ports, reputation, `check --json`, user-defined signatures
 
 ## Working with Claude
