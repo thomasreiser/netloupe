@@ -23,6 +23,7 @@ use tokio::sync::mpsc;
 
 use super::CheckContext;
 use crate::event::{CheckEvent, CheckUpdate};
+use crate::retry::{self, Failure};
 use crate::target::Target;
 
 /// How a name was found. A name corroborated by more than one source is
@@ -268,30 +269,39 @@ async fn query_crtsh(domain: &str, timeout: Duration) -> Result<Vec<String>, Str
         .build()
         .map_err(|e| e.to_string())?;
 
-    let response = client
-        .get("https://crt.sh/")
-        .query(&[("q", domain), ("output", "json")])
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-    if !response.status().is_success() {
-        return Err(format!("crt.sh returned {}", response.status()));
-    }
-    let entries: Vec<serde_json::Value> = response.json().await.map_err(|e| e.to_string())?;
+    // Retried (see `crate::retry`): crt.sh is netloupe's own helper
+    // request to a third party, and it's known to intermittently 502/503
+    // under load, which a short backoff-and-retry usually rides out.
+    retry::run(&retry::Policy::default(), || async {
+        let response = client
+            .get("https://crt.sh/")
+            .query(&[("q", domain), ("output", "json")])
+            .send()
+            .await
+            .map_err(retry::classify_send_error)?;
+        if !response.status().is_success() {
+            return Err(retry::classify_status(response.status()));
+        }
+        let entries: Vec<serde_json::Value> = response
+            .json()
+            .await
+            .map_err(|e| Failure::Retryable(e.to_string()))?;
 
-    let mut names = std::collections::BTreeSet::new();
-    for entry in entries.iter().take(200) {
-        let Some(name_value) = entry.get("name_value").and_then(|v| v.as_str()) else {
-            continue;
-        };
-        for line in name_value.lines() {
-            let name = normalize(line);
-            if !name.is_empty() {
-                names.insert(name);
+        let mut names = std::collections::BTreeSet::new();
+        for entry in entries.iter().take(200) {
+            let Some(name_value) = entry.get("name_value").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            for line in name_value.lines() {
+                let name = normalize(line);
+                if !name.is_empty() {
+                    names.insert(name);
+                }
             }
         }
-    }
-    Ok(names.into_iter().collect())
+        Ok(names.into_iter().collect())
+    })
+    .await
 }
 
 /// HackerTarget's free reverse-IP/passive-DNS lookup: no key needed, but
@@ -304,24 +314,36 @@ async fn query_reverse_ip(ip: IpAddr, timeout: Duration) -> Result<Vec<String>, 
         .build()
         .map_err(|e| e.to_string())?;
 
-    let response = client
-        .get("https://api.hackertarget.com/reverseiplookup/")
-        .query(&[("q", ip.to_string())])
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-    if !response.status().is_success() {
-        return Err(format!("HTTP {}", response.status()));
-    }
-    let body = response.text().await.map_err(|e| e.to_string())?;
-    if body.to_lowercase().contains("error") || body.to_lowercase().contains("api count exceeded") {
-        return Err(body.trim().to_string());
-    }
-    Ok(body
-        .lines()
-        .map(normalize)
-        .filter(|l| !l.is_empty())
-        .collect())
+    // Retried like `query_crtsh` above, with one exception: the free
+    // tier's rate-limit message arrives as a 200 with text in the body,
+    // not a 429, and retrying immediately into an active rate limit
+    // would just burn the retry budget for nothing -- that one case is
+    // `Fatal` rather than `Retryable`.
+    retry::run(&retry::Policy::default(), || async {
+        let response = client
+            .get("https://api.hackertarget.com/reverseiplookup/")
+            .query(&[("q", ip.to_string())])
+            .send()
+            .await
+            .map_err(retry::classify_send_error)?;
+        if !response.status().is_success() {
+            return Err(retry::classify_status(response.status()));
+        }
+        let body = response
+            .text()
+            .await
+            .map_err(|e| Failure::Retryable(e.to_string()))?;
+        let lower = body.to_lowercase();
+        if lower.contains("error") || lower.contains("api count exceeded") {
+            return Err(Failure::Fatal(body.trim().to_string()));
+        }
+        Ok(body
+            .lines()
+            .map(normalize)
+            .filter(|l| !l.is_empty())
+            .collect())
+    })
+    .await
 }
 
 #[cfg(test)]

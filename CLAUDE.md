@@ -186,6 +186,7 @@ src/
   target.rs            # Parsing/normalizing input: hostname, IPv4, IPv6, IDN, URL → host
   config.rs
   geoip.rs             # Background GeoLite2 City/ASN downloader (MaxMind GeoIP Update API)
+  retry.rs             # Jittered-backoff retry for calls to third-party helper APIs
   ui/                  # Rendering only; no I/O, no business logic
     mod.rs
     tabs.rs
@@ -230,6 +231,7 @@ tests/
 8. **Reuse results, don't repeat queries.** `hosting` consumes the results of DNS, HTTP, TLS and IP/ASN checks through a shared per-tab result store instead of issuing its own lookups. It re-evaluates whenever a new input arrives, so its pane fills in progressively.
 9. **The provider engine is synchronous and pure.** `providers::evaluate(&Inputs) -> Vec<Detection>` does no I/O, which keeps it trivially testable.
 10. **Headless mode.** `netloupe check <target> --json` runs the same checks without the TUI and prints structured results, which serves scripting and integration tests.
+11. **Retry third-party helper calls, never the target itself.** A request to some other service that merely *supports* a check -- crt.sh, RDAP, MaxMind's GeoIP Update API, a provider's IP-range list host, the Tor exit list, AbuseIPDB -- gets `crate::retry::run` (a small jittered-backoff loop; classify failures with `retry::classify_send_error`/`retry::classify_status`, or `Failure::Retryable`/`Failure::Fatal` directly when the shape doesn't fit those). A request to the target under inspection (`checks::http`, `checks::tls`, `checks::acme`'s challenge probes, `checks::ports`, ...) never gets this: a failure there *is* the measurement, and retrying it would misreport what's actually there.
 
 ## Commands
 

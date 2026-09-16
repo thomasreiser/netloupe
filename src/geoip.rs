@@ -16,6 +16,7 @@ use std::time::{Duration, SystemTime};
 use tokio::sync::{mpsc, watch};
 
 use crate::config::Config;
+use crate::retry::{self, Failure};
 
 pub const CITY_EDITION: &str = "GeoLite2-City";
 pub const ASN_EDITION: &str = "GeoLite2-ASN";
@@ -229,6 +230,9 @@ async fn download_editions(
 /// MaxMind's GeoIP Update download API: HTTP Basic auth (account ID as
 /// username, license key as password) against a per-edition URL,
 /// returning a `.tar.gz` whose one `.mmdb` member is what's wanted.
+/// Retried (see `crate::retry`) around the network request/response,
+/// since that's the part a transient blip can plausibly hit; a bad
+/// credential (401) or a corrupt archive won't fix itself on retry.
 async fn download_one(
     client: &reqwest::Client,
     account_id: u32,
@@ -238,29 +242,35 @@ async fn download_one(
 ) -> Result<(), String> {
     let url =
         format!("https://download.maxmind.com/geoip/databases/{edition_id}/download?suffix=tar.gz");
-    let response = client
-        .get(&url)
-        .basic_auth(account_id, Some(license_key))
-        .send()
-        .await
-        .map_err(|e| format!("{edition_id}: {e}"))?;
-    if response.status() == reqwest::StatusCode::UNAUTHORIZED {
-        return Err(format!(
-            "{edition_id}: MaxMind rejected the account ID/license key (401)"
-        ));
-    }
-    if !response.status().is_success() {
-        return Err(format!("{edition_id}: HTTP {}", response.status()));
-    }
-    let body = response
-        .bytes()
-        .await
-        .map_err(|e| format!("{edition_id}: {e}"))?;
     let dest = dest_dir.join(format!("{edition_id}.mmdb"));
-    tokio::task::spawn_blocking(move || extract_mmdb(&body, &dest))
-        .await
-        .map_err(|e| format!("{edition_id}: {e}"))??;
-    Ok(())
+
+    retry::run(&retry::Policy::default(), || async {
+        let response = client
+            .get(&url)
+            .basic_auth(account_id, Some(license_key))
+            .send()
+            .await
+            .map_err(retry::classify_send_error)?;
+        if response.status() == reqwest::StatusCode::UNAUTHORIZED {
+            return Err(Failure::Fatal(
+                "MaxMind rejected the account ID/license key (401)".to_string(),
+            ));
+        }
+        if !response.status().is_success() {
+            return Err(retry::classify_status(response.status()));
+        }
+        let body = response
+            .bytes()
+            .await
+            .map_err(|e| Failure::Retryable(e.to_string()))?;
+        let dest = dest.clone();
+        tokio::task::spawn_blocking(move || extract_mmdb(&body, &dest))
+            .await
+            .map_err(|e| Failure::Fatal(e.to_string()))?
+            .map_err(Failure::Fatal)
+    })
+    .await
+    .map_err(|e| format!("{edition_id}: {e}"))
 }
 
 /// Extracts the single `.mmdb` member out of a `tar.gz` archive body,

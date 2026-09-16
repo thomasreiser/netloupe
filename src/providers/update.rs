@@ -11,6 +11,7 @@ use std::path::Path;
 
 use super::ranges::source_filename;
 use super::signatures::{self, SignatureLoadError};
+use crate::retry::{self, Failure};
 
 #[derive(Debug, Default)]
 pub struct UpdateReport {
@@ -63,6 +64,18 @@ pub async fn update_all(
     Ok(report)
 }
 
+/// What one fetch attempt found, short of an outright failure: either the
+/// source hasn't changed (a 304, itself a successful outcome, not
+/// something to retry) or a fresh body to write.
+enum FetchOutcome {
+    Unchanged,
+    Fetched {
+        body: Vec<u8>,
+        etag: Option<String>,
+        last_modified: Option<String>,
+    },
+}
+
 async fn refresh_one(
     client: &reqwest::Client,
     cache_dir: &Path,
@@ -72,50 +85,64 @@ async fn refresh_one(
 ) {
     let etag_path = cache_dir.join(format!("{filename}.etag"));
     let last_modified_path = cache_dir.join(format!("{filename}.last-modified"));
-    let mut request = client.get(url);
-    if let Ok(etag) = std::fs::read_to_string(&etag_path) {
-        request = request.header(reqwest::header::IF_NONE_MATCH, etag.trim().to_string());
-    } else if let Ok(last_modified) = std::fs::read_to_string(&last_modified_path) {
-        // Falls back to Last-Modified only when there's no ETag to prefer:
-        // some sources (e.g. Cloudflare's plain-text IP lists) set neither,
-        // in which case every run just refetches, which is fine.
-        request = request.header(
-            reqwest::header::IF_MODIFIED_SINCE,
-            last_modified.trim().to_string(),
-        );
-    }
+    let cached_etag = std::fs::read_to_string(&etag_path).ok();
+    let cached_last_modified = std::fs::read_to_string(&last_modified_path).ok();
 
-    let response = match request.send().await {
-        Ok(r) => r,
-        Err(err) => {
-            report.failed.push((filename.to_string(), err.to_string()));
-            return;
+    // Retried (see `crate::retry`): these are netloupe's own requests to
+    // each provider's range-list host, not a measurement of anything --
+    // worth riding out a blip rather than reporting a source as failed.
+    let outcome = retry::run(&retry::Policy::default(), || async {
+        let mut request = client.get(url);
+        if let Some(etag) = &cached_etag {
+            request = request.header(reqwest::header::IF_NONE_MATCH, etag.trim().to_string());
+        } else if let Some(last_modified) = &cached_last_modified {
+            // Falls back to Last-Modified only when there's no ETag to
+            // prefer: some sources (e.g. Cloudflare's plain-text IP
+            // lists) set neither, in which case every run just
+            // refetches, which is fine.
+            request = request.header(
+                reqwest::header::IF_MODIFIED_SINCE,
+                last_modified.trim().to_string(),
+            );
         }
-    };
 
-    if response.status() == reqwest::StatusCode::NOT_MODIFIED {
-        report.unchanged.push(filename.to_string());
-        return;
-    }
-    if !response.status().is_success() {
-        report
-            .failed
-            .push((filename.to_string(), format!("HTTP {}", response.status())));
-        return;
-    }
+        let response = request.send().await.map_err(retry::classify_send_error)?;
+        if response.status() == reqwest::StatusCode::NOT_MODIFIED {
+            return Ok(FetchOutcome::Unchanged);
+        }
+        if !response.status().is_success() {
+            return Err(retry::classify_status(response.status()));
+        }
+        let etag = response
+            .headers()
+            .get(reqwest::header::ETAG)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string);
+        let last_modified = response
+            .headers()
+            .get(reqwest::header::LAST_MODIFIED)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string);
+        let body = response
+            .bytes()
+            .await
+            .map_err(|e| Failure::Retryable(e.to_string()))?
+            .to_vec();
+        Ok(FetchOutcome::Fetched {
+            body,
+            etag,
+            last_modified,
+        })
+    })
+    .await;
 
-    let etag = response
-        .headers()
-        .get(reqwest::header::ETAG)
-        .and_then(|v| v.to_str().ok())
-        .map(str::to_string);
-    let last_modified = response
-        .headers()
-        .get(reqwest::header::LAST_MODIFIED)
-        .and_then(|v| v.to_str().ok())
-        .map(str::to_string);
-    match response.bytes().await {
-        Ok(body) => {
+    match outcome {
+        Ok(FetchOutcome::Unchanged) => report.unchanged.push(filename.to_string()),
+        Ok(FetchOutcome::Fetched {
+            body,
+            etag,
+            last_modified,
+        }) => {
             if let Err(err) = std::fs::write(cache_dir.join(filename), &body) {
                 report.failed.push((filename.to_string(), err.to_string()));
                 return;
@@ -128,6 +155,6 @@ async fn refresh_one(
             }
             report.refreshed.push(filename.to_string());
         }
-        Err(err) => report.failed.push((filename.to_string(), err.to_string())),
+        Err(err) => report.failed.push((filename.to_string(), err)),
     }
 }
