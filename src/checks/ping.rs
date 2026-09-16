@@ -51,6 +51,10 @@ pub struct PingUpdate {
     pub avg: Option<Duration>,
     /// Set when ICMP couldn't be used at all, explaining the fallback.
     pub fallback_reason: Option<String>,
+    /// Idled via `Action::TogglePingPause` (Space, on the Ping/Trace
+    /// pane): no new probes are being sent, and everything above reflects
+    /// the last sample taken before pausing, not "no data".
+    pub paused: bool,
 }
 
 impl PingUpdate {
@@ -132,9 +136,11 @@ pub(crate) async fn run(ctx: CheckContext, tx: mpsc::Sender<CheckEvent>) {
         max: None,
         avg: None,
         fallback_reason,
+        paused: false,
     };
 
     let mut seq: u32 = 0;
+    let mut was_paused = false;
     loop {
         if ctx.cancel.is_cancelled() {
             let _ = tx
@@ -145,6 +151,41 @@ pub(crate) async fn run(ctx: CheckContext, tx: mpsc::Sender<CheckEvent>) {
                 })
                 .await;
             return;
+        }
+
+        // Idles rather than sending a probe while paused, leaving
+        // `update` (and so the sparkline/stats) exactly as they were --
+        // pausing is meant to freeze the view, not to lose history the
+        // way cancelling and losing this task's accumulated `samples`
+        // would.
+        if ctx.ping_paused.load(std::sync::atomic::Ordering::Relaxed) {
+            if !was_paused {
+                was_paused = true;
+                update.paused = true;
+                let payload = CheckPayload::Progress(CheckUpdate::Ping(update.clone()));
+                if tx
+                    .send(CheckEvent {
+                        tab_id: ctx.tab_id,
+                        check: id,
+                        payload,
+                    })
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            tokio::select! {
+                _ = tokio::time::sleep(PING_INTERVAL) => continue,
+                _ = ctx.cancel.cancelled() => {
+                    let _ = tx.send(CheckEvent { tab_id: ctx.tab_id, check: id, payload: CheckPayload::Cancelled }).await;
+                    return;
+                }
+            }
+        }
+        if was_paused {
+            was_paused = false;
+            update.paused = false;
         }
 
         let rtt = match (&icmp_client, method) {
@@ -240,6 +281,7 @@ mod tests {
             max: None,
             avg: None,
             fallback_reason: None,
+            paused: false,
         };
         update.recompute_stats();
         assert_eq!(update.received, 2);
@@ -260,6 +302,7 @@ mod tests {
             max: None,
             avg: None,
             fallback_reason: None,
+            paused: false,
         };
         update.recompute_stats();
         assert_eq!(update.received, 0);
@@ -288,6 +331,7 @@ mod tests {
             max: None,
             avg: None,
             fallback_reason: None,
+            paused: false,
         };
         update.recompute_stats();
         assert_eq!(update.sent, 2);

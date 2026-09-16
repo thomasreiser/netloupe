@@ -73,11 +73,21 @@ fn render_ping_summary(frame: &mut Frame, area: Rect, tab: &TabState) {
         )
     };
 
+    let mut method_spans = vec![
+        label("Method"),
+        Span::styled(method, Style::default().fg(theme::TEXT)),
+    ];
+    if ping.paused {
+        method_spans.push(Span::styled(
+            "  ⏸ paused (space to resume)",
+            Style::default()
+                .fg(theme::YELLOW)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+
     let lines = vec![
-        Line::from(vec![
-            label("Method"),
-            Span::styled(method, Style::default().fg(theme::TEXT)),
-        ]),
+        Line::from(method_spans),
         Line::from(vec![
             label("Sent/received"),
             Span::styled(
@@ -114,10 +124,14 @@ fn render_sparkline(frame: &mut Frame, area: Rect, tab: &TabState) {
     if ping.samples.is_empty() {
         return;
     }
-    let block = theme::panel("RTT", theme::pane_accent(crate::app::Pane::PingTrace));
+    let title = if ping.paused { "RTT (paused)" } else { "RTT" };
+    let block = theme::panel(title, theme::pane_accent(crate::app::Pane::PingTrace));
     let inner = block.inner(area);
     frame.render_widget(block, area);
-    frame.render_widget(crate::ui::widgets::sparkline::widget(&ping.samples), inner);
+    frame.render_widget(
+        crate::ui::widgets::sparkline::widget(&ping.samples, inner.width),
+        inner,
+    );
 }
 
 fn render_trace(frame: &mut Frame, area: Rect, tab: &TabState) {

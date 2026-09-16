@@ -143,6 +143,12 @@ pub struct TabState {
     /// chosen once via `Mode::ChooseResolver` when the tab was opened.
     /// `None` = the system's normally-configured resolver.
     pub resolver: Option<IpAddr>,
+    /// Shared with the running ping check's `CheckContext` (see
+    /// `checks::ping`): flipped by `Action::TogglePingPause` (Space, on
+    /// the Ping/Trace pane) so the check idles in place -- keeping its
+    /// accumulated sample history and sparkline exactly as they were --
+    /// rather than being cancelled and losing that history to a restart.
+    pub ping_paused: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl TabState {
@@ -253,6 +259,7 @@ impl AppState {
         let cancel = CancellationToken::new();
         let shared = SharedResultsHandle::new();
 
+        let ping_paused = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let tab = TabState {
             id,
             target: target.clone(),
@@ -265,11 +272,21 @@ impl AppState {
             zone_walk_confirmed: None,
             scroll: 0,
             resolver,
+            ping_paused: ping_paused.clone(),
         };
         self.tabs.push(tab);
         self.active_tab = self.tabs.len() - 1;
 
-        self.spawn_checks(id, target, cancel, shared, resolver, sender.clone(), &[]);
+        self.spawn_checks(
+            id,
+            target,
+            cancel,
+            shared,
+            resolver,
+            ping_paused,
+            sender.clone(),
+            &[],
+        );
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -280,6 +297,7 @@ impl AppState {
         cancel: CancellationToken,
         shared: SharedResultsHandle,
         resolver: Option<IpAddr>,
+        ping_paused: Arc<std::sync::atomic::AtomicBool>,
         sender: mpsc::Sender<CheckEvent>,
         confirmed_opt_ins: &[CheckId],
     ) {
@@ -296,6 +314,7 @@ impl AppState {
                 shared: shared.clone(),
                 providers: self.providers.clone(),
                 resolver,
+                ping_paused: ping_paused.clone(),
             };
             let tx = sender.clone();
             tokio::spawn(async move { check.run(ctx, tx).await });
@@ -314,6 +333,7 @@ impl AppState {
         let cancel = tab.cancel.clone();
         let shared = tab.shared.clone();
         let resolver = tab.resolver;
+        let ping_paused = tab.ping_paused.clone();
 
         for &check_id in pane.checks() {
             if check_id.requires_opt_in() {
@@ -326,6 +346,7 @@ impl AppState {
                 cancel.clone(),
                 shared.clone(),
                 resolver,
+                ping_paused.clone(),
                 sender.clone(),
             );
         }
@@ -341,6 +362,7 @@ impl AppState {
         let cancel = tab.cancel.clone();
         let shared = tab.shared.clone();
         let resolver = tab.resolver;
+        let ping_paused = tab.ping_paused.clone();
         let mut confirmed_opt_ins = Vec::new();
         if tab.ports_confirmed == Some(true) {
             confirmed_opt_ins.push(CheckId::Ports);
@@ -354,12 +376,12 @@ impl AppState {
             cancel,
             shared,
             resolver,
+            ping_paused,
             sender.clone(),
             &confirmed_opt_ins,
         );
     }
 
-    #[allow(clippy::too_many_arguments)]
     #[allow(clippy::too_many_arguments)]
     fn spawn_one_check(
         &self,
@@ -369,6 +391,7 @@ impl AppState {
         cancel: CancellationToken,
         shared: SharedResultsHandle,
         resolver: Option<IpAddr>,
+        ping_paused: Arc<std::sync::atomic::AtomicBool>,
         sender: mpsc::Sender<CheckEvent>,
     ) {
         if let Some(check) = checks::registry().into_iter().find(|c| c.id() == check_id) {
@@ -381,6 +404,7 @@ impl AppState {
                 shared,
                 providers: self.providers.clone(),
                 resolver,
+                ping_paused,
             };
             tokio::spawn(async move { check.run(ctx, sender).await });
         }
@@ -400,6 +424,7 @@ impl AppState {
         let cancel = tab.cancel.clone();
         let shared = tab.shared.clone();
         let resolver = tab.resolver;
+        let ping_paused = tab.ping_paused.clone();
         self.spawn_one_check(
             CheckId::Ports,
             tab_id,
@@ -407,6 +432,7 @@ impl AppState {
             cancel,
             shared,
             resolver,
+            ping_paused,
             sender.clone(),
         );
     }
@@ -424,6 +450,7 @@ impl AppState {
         let cancel = tab.cancel.clone();
         let shared = tab.shared.clone();
         let resolver = tab.resolver;
+        let ping_paused = tab.ping_paused.clone();
         self.spawn_one_check(
             CheckId::ZoneWalk,
             tab_id,
@@ -431,6 +458,7 @@ impl AppState {
             cancel,
             shared,
             resolver,
+            ping_paused,
             sender.clone(),
         );
     }
@@ -740,6 +768,17 @@ impl AppState {
             Action::OpenAltNames => self.open_alt_names_picker(),
             Action::OpenZoneWalk => self.open_zone_walk_confirm(),
             Action::OpenSettings => self.open_settings(),
+            Action::TogglePingPause => {
+                // Scoped to the Ping/Trace pane so Space doesn't do
+                // anything surprising while browsing other panes.
+                if self.current_pane() == Some(Pane::PingTrace) {
+                    if let Some(tab) = self.active() {
+                        let was = tab.ping_paused.load(std::sync::atomic::Ordering::Relaxed);
+                        tab.ping_paused
+                            .store(!was, std::sync::atomic::Ordering::Relaxed);
+                    }
+                }
+            }
             Action::CopyPane => {} // clipboard support is a later addition; no-op for now.
             _ => {}
         }
@@ -928,6 +967,7 @@ fn decode_normal_key(key: crossterm::event::KeyEvent) -> Action {
         KeyCode::Char('w') => Action::OpenZoneWalk,
         KeyCode::Char('y') => Action::CopyPane,
         KeyCode::Char('s') => Action::OpenSettings,
+        KeyCode::Char(' ') => Action::TogglePingPause,
         KeyCode::Char('?') => Action::ToggleHelp,
         KeyCode::Char('q') => Action::Quit,
         _ => Action::None,
@@ -1366,5 +1406,57 @@ mod tests {
         };
         assert_eq!(editing.as_deref(), Some("not a duration"));
         assert!(message.is_some(), "should explain why it was rejected");
+    }
+
+    /// Space on the Ping/Trace pane flips the shared flag the running
+    /// ping check idles on, without touching any other tab's flag.
+    #[tokio::test]
+    async fn toggle_ping_pause_flips_only_the_active_tabs_flag() {
+        let mut state = AppState::new(Config::default(), ProviderDb::default());
+        let tx = test_sender();
+        state.open_tab(local_target(), None, &tx);
+        state.open_tab(local_target(), None, &tx);
+
+        let ping_index = Pane::ALL
+            .iter()
+            .position(|&p| p == Pane::PingTrace)
+            .unwrap();
+        state.handle_action(Action::SelectPane(ping_index), &tx);
+
+        assert!(!state.tabs[1]
+            .ping_paused
+            .load(std::sync::atomic::Ordering::Relaxed));
+        state.handle_action(Action::TogglePingPause, &tx);
+        assert!(state.tabs[1]
+            .ping_paused
+            .load(std::sync::atomic::Ordering::Relaxed));
+        assert!(
+            !state.tabs[0]
+                .ping_paused
+                .load(std::sync::atomic::Ordering::Relaxed),
+            "the other tab's flag must be untouched"
+        );
+
+        state.handle_action(Action::TogglePingPause, &tx);
+        assert!(!state.tabs[1]
+            .ping_paused
+            .load(std::sync::atomic::Ordering::Relaxed));
+    }
+
+    /// Space must be scoped to the Ping/Trace pane so it doesn't do
+    /// anything surprising while browsing a different pane.
+    #[tokio::test]
+    async fn toggle_ping_pause_is_a_no_op_outside_the_ping_trace_pane() {
+        let mut state = AppState::new(Config::default(), ProviderDb::default());
+        let tx = test_sender();
+        state.open_tab(local_target(), None, &tx);
+
+        let overview_index = Pane::ALL.iter().position(|&p| p == Pane::Overview).unwrap();
+        state.handle_action(Action::SelectPane(overview_index), &tx);
+
+        state.handle_action(Action::TogglePingPause, &tx);
+        assert!(!state.tabs[0]
+            .ping_paused
+            .load(std::sync::atomic::Ordering::Relaxed));
     }
 }

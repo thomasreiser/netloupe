@@ -171,6 +171,7 @@ mod tests {
             shared: SharedResultsHandle::new(),
             providers: Arc::new(ProviderDb::default()),
             resolver: None,
+            ping_paused: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
         let (tx, mut rx) = mpsc::channel(8);
         run(ctx, tx).await;
