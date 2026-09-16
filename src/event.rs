@@ -8,14 +8,17 @@ use crate::checks::CheckId;
 use crate::providers::Detection;
 use crate::target::Target;
 
-/// A user-driven action, decoded from raw key input in `app.rs`. Kept
-/// separate from `KeyEvent` so key remapping only has to change one place.
+/// A user-driven action, decoded from raw key/mouse input in `app.rs`.
+/// Kept separate from `KeyEvent`/`MouseEvent` so remapping either only
+/// has to change one place.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Action {
     NewTab,
     CloseTab,
     NextTab,
     PrevTab,
+    /// Jumps directly to a host tab by index, e.g. from clicking it.
+    SelectHostTab(usize),
     SelectPane(usize),
     NextPane,
     PrevPane,

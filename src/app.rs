@@ -770,6 +770,12 @@ impl AppState {
                     self.reset_scroll();
                 }
             }
+            Action::SelectHostTab(i) => {
+                if i < self.tabs.len() {
+                    self.active_tab = i;
+                    self.reset_scroll();
+                }
+            }
             Action::SelectPane(i) => {
                 if let Some(tab) = self.tabs.get_mut(self.active_tab) {
                     if i < Pane::ALL.len() {
@@ -1020,6 +1026,61 @@ fn decode_normal_key(key: crossterm::event::KeyEvent) -> Action {
     }
 }
 
+/// Decodes a mouse event into an `Action`. Only meaningful in `Normal`
+/// mode and the two "yes/no" confirm prompts (mirroring `decode_key`'s
+/// Mode::ConfirmPorts | Mode::ConfirmZoneWalk arm: navigating away via a
+/// click shouldn't be trapped by an unanswered prompt any more than
+/// navigating away via a key is) -- every other mode is a modal popup
+/// expecting keyboard input, so a click anywhere just does nothing.
+///
+/// `terminal_area` is the whole terminal (as `Terminal::size()` reports
+/// it, matching `Frame::area()` in `ui::draw`), used to translate the
+/// mouse's absolute row/column into "which row of the layout is this"
+/// and "which column within the tab bar's own content area" -- the outer
+/// frame has a 1-cell border on every side, which both offsets need to
+/// account for.
+fn decode_mouse(
+    mode: &Mode,
+    terminal_area: ratatui::layout::Rect,
+    state: &AppState,
+    mouse: crossterm::event::MouseEvent,
+) -> Action {
+    use crossterm::event::{MouseButton, MouseEventKind};
+    if !matches!(
+        mode,
+        Mode::Normal | Mode::ConfirmPorts | Mode::ConfirmZoneWalk
+    ) {
+        return Action::None;
+    }
+
+    match mouse.kind {
+        MouseEventKind::ScrollUp => Action::ScrollUp,
+        MouseEventKind::ScrollDown => Action::ScrollDown,
+        MouseEventKind::Down(MouseButton::Left) => {
+            let host_tabs_row = terminal_area.y + 1;
+            let pane_tabs_row = terminal_area.y + 2;
+            let col = mouse.column.saturating_sub(terminal_area.x + 1);
+            if mouse.row == host_tabs_row {
+                if let Some(i) = crate::ui::tabs::host_tab_at(state, col) {
+                    Action::SelectHostTab(i)
+                } else if crate::ui::tabs::new_tab_label_at(state, col) {
+                    Action::NewTab
+                } else {
+                    Action::None
+                }
+            } else if mouse.row == pane_tabs_row {
+                match crate::ui::tabs::pane_tab_at(col) {
+                    Some(i) => Action::SelectPane(i),
+                    None => Action::None,
+                }
+            } else {
+                Action::None
+            }
+        }
+        _ => Action::None,
+    }
+}
+
 /// Runs the TUI to completion. Terminal setup/teardown is the caller's
 /// responsibility (see `main.rs`).
 pub async fn run(
@@ -1069,14 +1130,29 @@ pub async fn run(
         state.open_tab(target, None, &check_tx);
     }
 
+    // Updated by every `draw` call below so mouse handling (which needs
+    // to know the layout, but doesn't run inside a `draw`) can translate
+    // an absolute row/column the same way `ui::draw` laid it out.
+    let mut last_area = ratatui::layout::Rect::default();
+
     loop {
-        terminal.draw(|frame| crate::ui::draw(frame, &state))?;
+        terminal.draw(|frame| {
+            last_area = frame.area();
+            crate::ui::draw(frame, &state);
+        })?;
 
         tokio::select! {
             Some(term_event) = term_rx.recv() => {
-                if let crossterm::event::Event::Key(key) = term_event {
-                    let action = decode_key(&state.mode, key);
-                    state.handle_action(action, &check_tx);
+                match term_event {
+                    crossterm::event::Event::Key(key) => {
+                        let action = decode_key(&state.mode, key);
+                        state.handle_action(action, &check_tx);
+                    }
+                    crossterm::event::Event::Mouse(mouse) => {
+                        let action = decode_mouse(&state.mode, last_area, &state, mouse);
+                        state.handle_action(action, &check_tx);
+                    }
+                    _ => {}
                 }
             }
             Some(check_event) = check_rx.recv() => {
@@ -1519,5 +1595,107 @@ mod tests {
         assert!(!state.tabs[0]
             .ping_paused
             .load(std::sync::atomic::Ordering::Relaxed));
+    }
+
+    fn left_click(row: u16, column: u16) -> crossterm::event::MouseEvent {
+        crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            column,
+            row,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        }
+    }
+
+    /// End-to-end: a click landing on the second host tab's rendered span
+    /// (see `ui::tabs::host_tab_at`, exercised in isolation there) must
+    /// actually switch tabs when run through `decode_mouse` +
+    /// `handle_action`, the same path the real event loop uses.
+    #[tokio::test]
+    async fn clicking_a_host_tab_switches_to_it() {
+        let mut state = AppState::new(Config::default(), ProviderDb::default());
+        let tx = test_sender();
+        state.open_tab(Target::parse("192.168.1.1").unwrap(), None, &tx);
+        state.open_tab(Target::parse("192.168.1.2").unwrap(), None, &tx);
+        assert_eq!(state.active_tab, 1, "opening a tab activates it");
+        state.active_tab = 0;
+
+        // Rather than hand-deriving the second tab's exact column, search
+        // for the column `host_tab_at` itself maps to index 1 -- keeps
+        // this test correct regardless of label width. `decode_mouse`
+        // subtracts 1 from the absolute column for the outer frame's
+        // left border before calling `host_tab_at`, so add it back here.
+        let local_col = (0..40)
+            .find(|&c| crate::ui::tabs::host_tab_at(&state, c) == Some(1))
+            .expect("second host tab must be findable within the first 40 columns");
+        let terminal_area = ratatui::layout::Rect::new(0, 0, 80, 24);
+        let action = decode_mouse(
+            &state.mode,
+            terminal_area,
+            &state,
+            left_click(1, local_col + 1),
+        );
+        assert_eq!(action, Action::SelectHostTab(1));
+        state.handle_action(action, &tx);
+        assert_eq!(state.active_tab, 1);
+    }
+
+    /// Same idea for a pane-tab click: lands on the DNS tab's span and
+    /// switches the active tab's pane.
+    #[tokio::test]
+    async fn clicking_a_pane_tab_switches_to_it() {
+        let mut state = AppState::new(Config::default(), ProviderDb::default());
+        let tx = test_sender();
+        state.open_tab(local_target(), None, &tx);
+
+        let dns_index = Pane::ALL.iter().position(|&p| p == Pane::Dns).unwrap();
+        // As above: search for the column `pane_tab_at` maps to
+        // `dns_index` rather than hand-deriving it, and add back the
+        // 1-cell left-border offset `decode_mouse` subtracts.
+        let local_col = (0..40)
+            .find(|&c| crate::ui::tabs::pane_tab_at(c) == Some(dns_index))
+            .expect("DNS pane tab must be findable within the first 40 columns");
+
+        let terminal_area = ratatui::layout::Rect::new(0, 0, 80, 24);
+        let action = decode_mouse(
+            &state.mode,
+            terminal_area,
+            &state,
+            left_click(2, local_col + 1),
+        );
+        assert_eq!(action, Action::SelectPane(dns_index));
+        state.handle_action(action, &tx);
+        assert_eq!(state.tabs[0].active_pane, dns_index);
+    }
+
+    /// A scroll event anywhere must translate to the same scroll action
+    /// regardless of where exactly it lands, and must be ignored in a
+    /// mode that isn't expecting mouse input at all (e.g. the help
+    /// overlay, which -- like most non-prompt modes -- only understands
+    /// keyboard input).
+    #[tokio::test]
+    async fn scroll_wheel_scrolls_and_is_ignored_outside_normal_ish_modes() {
+        let mut state = AppState::new(Config::default(), ProviderDb::default());
+        let tx = test_sender();
+        state.open_tab(local_target(), None, &tx);
+
+        let terminal_area = ratatui::layout::Rect::new(0, 0, 80, 24);
+        let scroll_down = crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::ScrollDown,
+            column: 10,
+            row: 10,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        };
+        assert_eq!(
+            decode_mouse(&Mode::Normal, terminal_area, &state, scroll_down),
+            Action::ScrollDown
+        );
+
+        state.handle_action(Action::ToggleHelp, &tx);
+        assert!(matches!(state.mode, Mode::Help));
+        assert_eq!(
+            decode_mouse(&state.mode, terminal_area, &state, scroll_down),
+            Action::None,
+            "the help overlay isn't a mouse-aware mode"
+        );
     }
 }
