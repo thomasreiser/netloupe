@@ -24,6 +24,7 @@ Requires a recent stable Rust toolchain (`cargo build` uses edition 2021).
 cargo build --release
 ./target/release/netloupe example.com 8.8.8.8   # open with two tabs
 ./target/release/netloupe check example.com --json   # headless, scriptable
+./target/release/netloupe check example.com --resolver 1.1.1.1 --json  # query a specific DNS server
 ./target/release/netloupe update-data                # refresh cached provider IP ranges
 ```
 
@@ -34,32 +35,38 @@ the cache with the latest lists.
 GeoIP lookups need a MaxMind account: set `[geoip].account_id` /
 `license_key` in the config file (or via the in-app settings editor, `s`)
 and netloupe downloads the GeoLite2 City/ASN databases itself, refreshing
-them on `[geoip].update_interval` (default 1 day). Everything else works
-with no setup and no API keys; reputation lookups use public DNSBLs and
-the Tor exit list, with AbuseIPDB as an optional extra if you configure a
-key.
+them on `[geoip].update_interval` (default 1 day). The current status (no
+credentials / updating / database age) shows in the bottom-right of the
+status line and at the top of the Geo pane. Everything else works with no
+setup and no API keys; reputation lookups use public DNSBLs and the Tor
+exit list, with AbuseIPDB as an optional extra if you configure a key.
+
+Opening a new host always asks which DNS server to query (blank for the
+system default); the same server is then used for every check on that
+tab, not just the DNS pane, and `check --resolver <ip>` is the headless
+equivalent.
 
 Config lives at `$XDG_CONFIG_HOME/netloupe/config.toml` (all optional —
 see `Config` in `src/config.rs` for every field and its default).
 
 ## Keybindings
 
-| Key                          | Action                                                |
-| ---------------------------- | ----------------------------------------------------- |
-| `Ctrl+t` / `Ctrl+w`          | New tab / close tab                                   |
-| `Tab` / `Shift+Tab`          | Next / previous host tab                              |
-| `1`–`9`, `0`, `-` or `←` `→` | Switch pane                                           |
-| `↑`/`↓`, `PgUp`/`PgDn`       | Scroll the current pane's content                     |
-| `r`                          | Re-run checks for the current pane                    |
-| `R`                          | Re-run all checks for the current host                |
-| `e`                          | Toggle evidence details (Hosting pane)                |
-| `a`                          | Open the alternative-hostname picker (Overview)       |
-| `w`                          | Walk an NSEC-signed zone for its full name list (DNS) |
+| Key                          | Action                                                 |
+| ---------------------------- | ------------------------------------------------------ |
+| `Ctrl+t` / `Ctrl+w`          | New tab / close tab                                    |
+| `Tab` / `Shift+Tab`          | Next / previous host tab                               |
+| `1`–`9`, `0`, `-` or `←` `→` | Switch pane                                            |
+| `↑`/`↓`, `PgUp`/`PgDn`       | Scroll the current pane's content                      |
+| `r`                          | Re-run checks for the current pane                     |
+| `R`                          | Re-run all checks for the current host                 |
+| `e`                          | Toggle evidence details (Hosting pane)                 |
+| `a`                          | Open the alternative-hostname picker (Overview)        |
+| `w`                          | Walk an NSEC-signed zone for its full name list (DNS)  |
 | `Space`                      | Pause/resume the continuous ICMP/TCP ping (Ping/Trace) |
-| `s`                          | Open the settings editor              |
-| `y`                          | Copy the current pane as text                         |
-| `?`                          | Help overlay                                          |
-| `q`                          | Quit                                                  |
+| `s`                          | Open the settings editor                               |
+| `y`                          | Copy the current pane as text                          |
+| `?`                          | Help overlay                                           |
+| `q`                          | Quit                                                   |
 
 ## Development
 
@@ -73,12 +80,12 @@ cargo xtask update-data             # regenerate the bundled data/snapshot/
 
 ## Status
 
-Implements the roadmap's MVP and phase-2/3 panes (DNS, Ping, Overview,
-IP/ASN, Hosting, Mail, TLS, HTTP, Geo, Rep) plus headless `check --json`
-and the opt-in Ports scan. **Traceroute isn't implemented yet** — it needs
-a raw ICMP socket to receive `Time Exceeded` replies (the same privilege
-constraint as ping, see `CLAUDE.md`'s platform notes) plus hand-rolled
-packet parsing that felt too risky to ship without being able to verify it
-against real routers; the Ping/Trace pane says so plainly rather than
-faking hop data. RPKI route-origin validation is also not implemented
-(`IP/ASN` pane shows this explicitly rather than guessing).
+Implements the roadmap's MVP and phase-2/3/4 panes (DNS, Ping/Trace,
+Overview, IP/ASN, Hosting, Mail, TLS, HTTP, Geo, Rep) plus headless
+`check --json` and the opt-in Ports scan. Traceroute uses a real ICMP
+hop-by-hop trace when a raw socket is available (root, `CAP_NET_RAW`, or
+Linux's unprivileged `ping_group_range`), falling back to a TCP-connect
+TTL sweep otherwise — that can only say how many hops away the target is,
+not which routers are in between, and the pane says so plainly. RPKI
+route-origin validation isn't implemented (the `IP/ASN` pane shows this
+explicitly rather than guessing).
