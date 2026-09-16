@@ -388,7 +388,14 @@ fn ip_from_octets(octets: &[u8]) -> Option<IpAddr> {
     }
 }
 
-fn client_config() -> ClientConfig {
+/// Also used by `checks::http`'s raw HTTP/1.0 probe, which needs its own
+/// bare TLS connection rather than going through reqwest (reqwest's
+/// client always writes `HTTP/1.1` on the request line -- there's no
+/// builder option to send an actual `HTTP/1.0` request, so answering
+/// "does this server handle one" needs to speak the wire protocol
+/// directly, the same way this module already does for the inspection
+/// connection above).
+pub(crate) fn client_config() -> ClientConfig {
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     ClientConfig::builder_with_provider(provider)
         .with_safe_default_protocol_versions()

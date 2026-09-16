@@ -1,12 +1,18 @@
-//! HTTP pane: status, redirect chain, timing, security headers, and the
-//! negotiated HTTP version.
+//! HTTP pane: status, redirect chain, timing, security headers, and a
+//! per-version support table (HTTP/1.0, HTTP/1.1, HTTP/2 over TLS, h2c,
+//! HTTP/3), each from its own dedicated, protocol-forced probe rather
+//! than inferred from whichever one the main flow's ordinary negotiation
+//! happened to land on.
 //!
 //! Redirects are followed manually (rather than via reqwest's built-in
 //! policy) so each hop's URL and status can be shown, not just the final
 //! destination.
 
+use std::net::IpAddr;
 use std::time::{Duration, Instant};
 
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 
 use super::CheckContext;
@@ -75,6 +81,16 @@ pub struct PlainHttpProbe {
 /// ALPN over a plain TCP+TLS connection at all.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct HttpVersionSupport {
+    /// HTTPS, a raw `GET / HTTP/1.0` request written directly over the
+    /// TLS connection (reqwest's client always writes `HTTP/1.1` on the
+    /// request line, with no builder option to send an actual 1.0
+    /// request, so this one is hand-rolled like `checks::tls`'s
+    /// inspection connection). "Supported" here means the server
+    /// answered with a valid HTTP status line at all -- a compliant
+    /// server normally replies `HTTP/1.1` even to a 1.0 request (that's
+    /// correct behavior per RFC 7230, not a sign of non-support), so an
+    /// exact "HTTP/1.0" echo isn't what this is checking for.
+    pub http1_0_tls: bool,
     /// HTTPS, client offers only `http/1.1` via ALPN.
     pub http1_tls: bool,
     /// HTTPS, client offers only `h2` via ALPN.
@@ -122,6 +138,7 @@ pub(crate) async fn run(ctx: CheckContext, tx: mpsc::Sender<CheckEvent>) {
         };
 
         let http_url = url_for(&host, port, false);
+        let https_port = port.unwrap_or(443);
 
         // Every version/transport probe below is independent of the main
         // flow (and of each other), so they all run concurrently rather
@@ -131,6 +148,12 @@ pub(crate) async fn run(ctx: CheckContext, tx: mpsc::Sender<CheckEvent>) {
         let http2_probe = probe_forced(&https_url, timeout, reqwest::Version::HTTP_2, false);
         let h2c_probe = probe_forced(&http_url, timeout, reqwest::Version::HTTP_2, false);
         let http3_probe = probe_forced(&https_url, timeout, reqwest::Version::HTTP_3, true);
+        let http1_0_probe = async {
+            match super::resolve_target_ip(&ctx).await {
+                Ok(ip) => probe_http1_0(ip, &host, https_port, timeout).await,
+                Err(_) => false,
+            }
+        };
 
         let main_flow = async {
             if let Err(https_err) = run_into(&https_url, timeout, &mut result).await {
@@ -148,9 +171,10 @@ pub(crate) async fn run(ctx: CheckContext, tx: mpsc::Sender<CheckEvent>) {
             }
         };
 
-        let (_, plain_http, http1, http2, h2c, http3) = tokio::join!(
+        let (_, plain_http, http1_0, http1, http2, h2c, http3) = tokio::join!(
             main_flow,
             plain_http_probe,
+            http1_0_probe,
             http1_probe,
             http2_probe,
             h2c_probe,
@@ -158,6 +182,7 @@ pub(crate) async fn run(ctx: CheckContext, tx: mpsc::Sender<CheckEvent>) {
         );
         result.plain_http = Some(plain_http);
         result.versions = HttpVersionSupport {
+            http1_0_tls: http1_0,
             http1_tls: http1,
             http2_tls: http2,
             h2c,
@@ -259,6 +284,48 @@ async fn probe_forced(
         request.send().await,
         Ok(response) if response.version() == version
     )
+}
+
+/// Writes a raw `GET / HTTP/1.0` request directly over a TLS connection
+/// to `ip:port` and checks for a valid HTTP status line back -- see
+/// `HttpVersionSupport::http1_0_tls` for why this can't go through
+/// reqwest like the other probes. Reuses `checks::tls`'s "accept any
+/// certificate" config: this is a protocol probe, not a trust decision,
+/// exactly like that module's own inspection connection.
+async fn probe_http1_0(ip: IpAddr, host: &str, port: u16, timeout: Duration) -> bool {
+    let attempt = async {
+        let config = crate::checks::tls::client_config();
+        let connector = tokio_rustls::TlsConnector::from(std::sync::Arc::new(config));
+        let server_name =
+            rustls::pki_types::ServerName::try_from(host.to_string()).map_err(|e| e.to_string())?;
+
+        let tcp = TcpStream::connect((ip, port))
+            .await
+            .map_err(|e| e.to_string())?;
+        let mut stream = connector
+            .connect(server_name, tcp)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        let request = format!(
+            "GET / HTTP/1.0\r\nHost: {host}\r\nUser-Agent: netloupe/{}\r\nConnection: close\r\n\r\n",
+            env!("CARGO_PKG_VERSION")
+        );
+        stream
+            .write_all(request.as_bytes())
+            .await
+            .map_err(|e| e.to_string())?;
+
+        // Enough to see the status line ("HTTP/1.1 200 OK\r\n...") without
+        // reading a whole response body we have no use for.
+        let mut buf = [0u8; 32];
+        let n = stream.read(&mut buf).await.map_err(|e| e.to_string())?;
+        Ok::<bool, String>(buf[..n].starts_with(b"HTTP/1."))
+    };
+    tokio::time::timeout(timeout, attempt)
+        .await
+        .unwrap_or(Ok(false))
+        .unwrap_or(false)
 }
 
 async fn run_into(

@@ -418,6 +418,7 @@ fn update_json(update: &CheckUpdate) -> serde_json::Value {
                 "error": p.error,
             })),
             "versions": {
+                "http1_0_tls": h.versions.http1_0_tls,
                 "http1_tls": h.versions.http1_tls,
                 "http2_tls": h.versions.http2_tls,
                 "h2c": h.versions.h2c,
