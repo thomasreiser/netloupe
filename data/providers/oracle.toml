@@ -1,0 +1,12 @@
+id = "oracle"
+name = "Oracle Cloud Infrastructure"
+kind = ["cloud"]
+
+[ranges]
+sources = [
+  { url = "https://docs.oracle.com/en-us/iaas/tools/public_ip_ranges.json", format = "oracle-json" },
+]
+default_layer = "origin"
+
+[asn]
+numbers = [31898]

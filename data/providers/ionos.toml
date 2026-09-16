@@ -1,0 +1,12 @@
+id = "ionos"
+name = "IONOS"
+kind = ["cloud", "dns"]
+
+[asn]
+numbers = [8560]
+
+[[signal]]
+layer = "dns"
+type = "ns"
+pattern = "*.ui-dns.*"
+weight = 90

@@ -1,0 +1,12 @@
+id = "ovhcloud"
+name = "OVHcloud"
+kind = ["cloud"]
+
+[asn]
+numbers = [16276]
+
+[[signal]]
+layer = "origin"
+type = "ptr"
+pattern = "*.ovh.net"
+weight = 60

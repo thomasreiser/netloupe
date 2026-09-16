@@ -1,0 +1,16 @@
+[package]
+name = "xtask"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+anyhow = "1"
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "blocking", "json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "1"
+clap = { version = "4", features = ["derive"] }
+csv = "1"
+netloupe = { path = ".." }
+chrono = { version = "0.4", default-features = false, features = ["clock"] }

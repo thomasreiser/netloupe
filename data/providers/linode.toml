@@ -1,0 +1,12 @@
+id = "linode"
+name = "Linode (Akamai)"
+kind = ["cloud"]
+
+[asn]
+numbers = [63949]
+
+[[signal]]
+layer = "origin"
+type = "ptr"
+pattern = "*.members.linode.com"
+weight = 60

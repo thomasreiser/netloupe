@@ -1,0 +1,25 @@
+id = "akamai"
+name = "Akamai"
+kind = ["cdn"]
+
+[asn]
+numbers = [20940, 16625]
+
+[[signal]]
+layer = "edge"
+type = "header"
+name = "server"
+value_regex = "(?i)akamaighost"
+weight = 50
+
+[[signal]]
+layer = "edge"
+type = "ptr"
+pattern = "*.akamaiedge.net"
+weight = 60
+
+[[signal]]
+layer = "edge"
+type = "ptr"
+pattern = "*.akamaitechnologies.com"
+weight = 60

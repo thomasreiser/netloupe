@@ -1,0 +1,19 @@
+id = "github"
+name = "GitHub"
+kind = ["hosting", "saas"]
+
+[ranges]
+sources = [
+  { url = "https://api.github.com/meta", format = "github-meta" },
+]
+default_layer = "origin"
+
+[ranges.service_layers]
+pages = "origin"
+actions = "saas"
+
+[[signal]]
+layer = "origin"
+type = "cname"
+pattern = "*.github.io"
+weight = 70

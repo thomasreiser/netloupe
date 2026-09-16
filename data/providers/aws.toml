@@ -1,0 +1,55 @@
+id = "aws"
+name = "Amazon Web Services"
+kind = ["cloud", "dns"]
+
+[ranges]
+sources = [
+  { url = "https://ip-ranges.amazonaws.com/ip-ranges.json", format = "aws-json" },
+]
+default_layer = "origin"
+
+[ranges.service_layers]
+CLOUDFRONT = "edge"
+GLOBALACCELERATOR = "edge"
+AMAZON = "origin"
+EC2 = "origin"
+S3 = "origin"
+
+[asn]
+numbers = [16509, 14618]
+
+[[signal]]
+layer = "dns"
+type = "ns"
+pattern = "*.awsdns-*"
+weight = 90
+
+[[signal]]
+layer = "edge"
+type = "header"
+name = "x-amz-cf-id"
+weight = 60
+
+[[signal]]
+layer = "edge"
+type = "cname"
+pattern = "*.cloudfront.net"
+weight = 70
+
+[[signal]]
+layer = "origin"
+type = "cname"
+pattern = "*.s3.amazonaws.com"
+weight = 60
+
+[[signal]]
+layer = "origin"
+type = "cname"
+pattern = "*.elb.amazonaws.com"
+weight = 60
+
+[[signal]]
+layer = "origin"
+type = "ptr"
+pattern = "*.compute.amazonaws.com"
+weight = 60

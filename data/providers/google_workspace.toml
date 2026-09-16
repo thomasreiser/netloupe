@@ -1,0 +1,15 @@
+id = "google_workspace"
+name = "Google Workspace"
+kind = ["mail"]
+
+[[signal]]
+layer = "mail"
+type = "mx"
+pattern = "*aspmx.l.google.com"
+weight = 80
+
+[[signal]]
+layer = "mail"
+type = "spf_include"
+pattern = "_spf.google.com"
+weight = 70

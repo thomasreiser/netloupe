@@ -1,0 +1,1 @@
+{"regions": [{"region": "mx-monterrey-1", "cidrs": [{"cidr": "40.233.0.0/19", "tags": ["OCI"]}, {"cidr": "bad-cidr", "tags": []}]}, {"region": "no-cidrs"}]}
