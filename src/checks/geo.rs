@@ -1,9 +1,11 @@
 //! Geo pane: country/region/city, timezone, org, and connection-type hints
-//! from user-supplied GeoLite2 databases.
+//! from the GeoLite2 City/ASN databases.
 //!
-//! MaxMind's GeoLite2 `.mmdb` files aren't redistributable, so this check
-//! only works when the user has pointed `[geoip]` at their own copies (see
-//! `config.rs`); otherwise it reports that plainly instead of guessing.
+//! `crate::geoip`'s background updater is the only thing that ever
+//! downloads these (into `crate::geoip::cache_dir()`, once MaxMind
+//! credentials are configured); this check only ever reads whatever's
+//! there right now and reports plainly when nothing is, rather than
+//! guessing or triggering a download itself.
 
 use std::net::IpAddr;
 use std::path::PathBuf;
@@ -50,35 +52,53 @@ pub(crate) async fn run(ctx: CheckContext, tx: mpsc::Sender<CheckEvent>) {
             return Ok(CheckUpdate::Geo(result));
         }
 
-        let city_db = ctx.config.geoip.city_db.clone();
-        let asn_db = ctx.config.geoip.asn_db.clone();
-
-        if city_db.is_none() && asn_db.is_none() {
+        let Some(cache_dir) = crate::geoip::cache_dir() else {
             result.errors.push(
-                "no GeoLite2 database configured (set [geoip].city_db / asn_db in config.toml)"
+                "could not determine a cache directory for GeoLite2 databases on this platform"
                     .to_string(),
             );
             return Ok(CheckUpdate::Geo(result));
+        };
+        let city_path = crate::geoip::city_db_path(&cache_dir);
+        let asn_path = crate::geoip::asn_db_path(&cache_dir);
+        let city_present = city_path.is_file();
+        let asn_present = asn_path.is_file();
+
+        if !city_present && !asn_present {
+            result.errors.push(if ctx.config.geoip.credentials().is_some() {
+                "GeoLite2 databases not downloaded yet -- see the GeoIP status in the bottom-right corner".to_string()
+            } else {
+                "GeoLite2 not configured -- set a MaxMind account ID and license key (press 's' for the settings editor)".to_string()
+            });
+            return Ok(CheckUpdate::Geo(result));
         }
 
-        if let Some(path) = city_db {
-            match lookup_city(path, ip).await {
+        if city_present {
+            match lookup_city(city_path, ip).await {
                 Ok(Some(fields)) => apply_city_fields(&mut result, fields),
                 Ok(None) => result
                     .errors
                     .push("IP not found in the City database".to_string()),
                 Err(err) => result.errors.push(format!("City database: {err}")),
             }
+        } else {
+            result
+                .errors
+                .push("City database not downloaded yet".to_string());
         }
 
-        if let Some(path) = asn_db {
-            match lookup_asn_org(path, ip).await {
+        if asn_present {
+            match lookup_asn_org(asn_path, ip).await {
                 Ok(Some(org)) => result.asn_org = Some(org),
                 Ok(None) => result
                     .errors
                     .push("IP not found in the ASN database".to_string()),
                 Err(err) => result.errors.push(format!("ASN database: {err}")),
             }
+        } else {
+            result
+                .errors
+                .push("ASN database not downloaded yet".to_string());
         }
 
         Ok(CheckUpdate::Geo(result))

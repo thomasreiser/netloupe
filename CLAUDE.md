@@ -168,7 +168,7 @@ Supported `format` values: `plain` (one CIDR per line), `aws-json`, `gcp-json`, 
 - **HTTP:** `reqwest` (rustls backend, no OpenSSL)
 - **IP prefixes:** `ipnet` plus a longest-prefix-match table (e.g. `ip_network_table`)
 - **Pattern matching:** `globset` for hostname patterns, `regex` for header values
-- **GeoIP:** `maxminddb` with GeoLite2 City/ASN databases, supplied by the user and never committed
+- **GeoIP:** `maxminddb` with GeoLite2 City/ASN databases, downloaded automatically (see Configuration) once MaxMind credentials are set, never committed
 - **RDAP/WHOIS:** RDAP over HTTP first, with raw WHOIS on port 43 as the fallback
 - **CLI/config:** `clap` (derive), `serde` + `toml`, `directories` for XDG paths
 - **Errors:** `thiserror` in library modules, `anyhow` only in `main.rs` and `xtask`
@@ -185,6 +185,7 @@ src/
   event.rs             # Input + message types (Action, CheckEvent)
   target.rs            # Parsing/normalizing input: hostname, IPv4, IPv6, IDN, URL → host
   config.rs
+  geoip.rs             # Background GeoLite2 City/ASN downloader (MaxMind GeoIP Update API)
   ui/                  # Rendering only; no I/O, no business logic
     mod.rs
     tabs.rs
@@ -290,10 +291,10 @@ Before finishing any task, run `cargo fmt`, `cargo clippy` (with no warnings), a
 Config lives at `$XDG_CONFIG_HOME/netloupe/config.toml`. Every option has a sensible default so the tool runs with no config file at all. It covers:
 - resolvers to use (the system resolver by default, plus a comparison set: 1.1.1.1, 8.8.8.8, 9.9.9.9)
 - **Per-tab custom DNS server.** Opening a new host (`Ctrl+t`, or selecting an alternative hostname) always asks which DNS server to query, pre-filled with the last one chosen this session so repeating it is just Enter; blank means the system's normal resolver. Every check that resolves names for that tab (not just the DNS pane) queries that server, threaded through `checks::dns::DnsOpts`. `check <target> --resolver <ip>` is the headless equivalent.
-- **In-app settings editor** (`s`, see `src/settings.rs`): a curated list of the fields someone would actually reach for interactively (GeoLite2 DB paths, the extra signature directory, timeouts, the port scan list, comparison resolvers, API keys, theme) -- not every `Config` field. `↑`/`↓` selects, Enter edits (pre-filled with the current value) and commits, Esc cancels an edit or closes the editor. A committed field applies to `AppState::config` immediately (new checks pick it up; already-running ones keep whatever they started with) and is written back to `config.toml` right away, so there's no separate unsaved draft to lose.
+- **In-app settings editor** (`s`, see `src/settings.rs`): a curated list of the fields someone would actually reach for interactively (MaxMind credentials and update interval, the extra signature directory, timeouts, the port scan list, comparison resolvers, API keys, theme) -- not every `Config` field. `↑`/`↓` selects, Enter edits (pre-filled with the current value) and commits, Esc cancels an edit or closes the editor. A committed field applies to `AppState::config` immediately (new checks pick it up; already-running ones keep whatever they started with) and is written back to `config.toml` right away, so there's no separate unsaved draft to lose.
 - timeouts per check type
 - the port list for scans
-- paths to the GeoLite2 `.mmdb` files
+- **GeoLite2 databases, downloaded automatically.** `[geoip].account_id` / `license_key` (a MaxMind account's numeric ID and license key, from its license-key page) are the only GeoIP setting; there's no local `.mmdb` path to point at. Once both are set, `crate::geoip::run_background_updater` (spawned for the life of the TUI) downloads the City and ASN editions into `$XDG_CACHE_HOME/netloupe/geoip/` via MaxMind's GeoIP Update API and refreshes them every `[geoip].update_interval` (default 1 day; also accepts things like "4h" or "7days") -- checked opportunistically on a timer, reacting immediately if credentials are added/changed via the settings editor rather than waiting out the old interval. `checks::geo` only ever reads whatever's in that cache; it never downloads anything itself. The current status (no credentials / updating / age of the cached databases / last download's error) is shown in the bottom-right of the status line and at the top of the Geo pane. Headless `check` reads the same cache but never triggers a download.
 - `[hosting]`: enabled providers, confidence thresholds, max data age before warning, and an extra signature directory for user-defined providers (e.g. an internal company IP range)
 - optional API keys for reputation providers
 - keybindings and color theme

@@ -1,15 +1,26 @@
 //! Geo pane: country/region/city, timezone, org.
 
-use ratatui::layout::Rect;
+use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::style::Style;
+use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
 use super::{empty_message, header_and_body, is_waiting};
 use crate::app::TabState;
 use crate::checks::CheckId;
 use crate::event::CheckUpdate;
+use crate::geoip::GeoipStatus;
+use crate::ui::theme;
 
-pub fn render(frame: &mut Frame, area: Rect, tab: &TabState) {
+pub fn render(frame: &mut Frame, area: Rect, tab: &TabState, geoip: &GeoipStatus) {
     let body = header_and_body(frame, area, tab, &[CheckId::Geo]);
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Min(0)])
+        .split(body);
+    render_geoip_status(frame, chunks[0], geoip);
+    let body = chunks[1];
+
     let slot = tab.slot(CheckId::Geo);
 
     let Some(CheckUpdate::Geo(geo)) = &slot.update else {
@@ -69,4 +80,25 @@ pub fn render(frame: &mut Frame, area: Rect, tab: &TabState) {
     if !geo.errors.is_empty() {
         frame.render_widget(super::errors_widget(&geo.errors), chunks[1]);
     }
+}
+
+/// Live status of the GeoLite2 background downloader (see `crate::geoip`),
+/// shown above the check's own data/errors: it's the one thing that
+/// actually explains "why is there nothing here" when the databases
+/// haven't been downloaded yet, since the check itself has no visibility
+/// into whether that's still in progress.
+fn render_geoip_status(frame: &mut Frame, area: Rect, geoip: &GeoipStatus) {
+    let color = if geoip.downloading {
+        theme::CYAN
+    } else if !geoip.configured {
+        theme::MUTED
+    } else if geoip.last_error.is_some() && geoip.last_success.is_none() {
+        theme::RED
+    } else {
+        theme::MUTED
+    };
+    frame.render_widget(
+        Paragraph::new(geoip.status_text()).style(Style::default().fg(color)),
+        area,
+    );
 }

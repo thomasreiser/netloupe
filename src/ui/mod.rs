@@ -48,7 +48,7 @@ pub fn draw(frame: &mut Frame, state: &AppState) {
     tabs::render_pane_tabs(frame, chunks[1], state);
 
     match state.active() {
-        Some(tab) => panes::render(frame, chunks[2], tab),
+        Some(tab) => panes::render(frame, chunks[2], tab, &state.geoip),
         None => frame.render_widget(
             Paragraph::new("No hosts open. Press Ctrl+t to add one.")
                 .style(Style::default().fg(theme::MUTED)),
@@ -142,7 +142,30 @@ fn render_status_line(frame: &mut Frame, area: Rect, state: &AppState) {
             Style::default().fg(theme::YELLOW),
         ));
     }
-    frame.render_widget(Line::from(spans), area);
+
+    let geoip_text = state.geoip.status_text();
+    let geoip_color = if state.geoip.downloading {
+        theme::CYAN
+    } else if !state.geoip.configured {
+        theme::FAINT
+    } else if state.geoip.last_error.is_some() && state.geoip.last_success.is_none() {
+        theme::RED
+    } else {
+        theme::MUTED
+    };
+    // Split off a fixed-width right column for the GeoIP hint rather than
+    // appending it to `spans`, so it stays pinned to the bottom-right
+    // corner regardless of how long the keybinding hints on the left are.
+    let right_width = geoip_text.chars().count() as u16 + 1;
+    let columns = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Min(0), Constraint::Length(right_width)])
+        .split(area);
+    frame.render_widget(Line::from(spans), columns[0]);
+    frame.render_widget(
+        Line::from(Span::styled(geoip_text, Style::default().fg(geoip_color))).right_aligned(),
+        columns[1],
+    );
 }
 
 /// A centered floating box, sized to a fraction of the terminal.
@@ -763,6 +786,34 @@ mod tests {
         assert!(
             content.contains("Example CDN"),
             "expected the hosting detection to appear in the dashboard"
+        );
+    }
+
+    /// The GeoIP status must be visible both pinned to the bottom-right
+    /// of the status line and at the top of the Geo pane -- the two
+    /// places `render_status_line`/`geo::render` were changed to surface
+    /// `AppState::geoip`.
+    #[test]
+    fn geoip_status_appears_on_the_status_line_and_the_geo_pane() {
+        let mut state = AppState::new(Config::default(), ProviderDb::default());
+        state.geoip = crate::geoip::GeoipStatus {
+            configured: true,
+            downloading: false,
+            last_success: Some(std::time::SystemTime::now() - Duration::from_secs(3 * 3600)),
+            last_error: None,
+        };
+        state.tabs.push(empty_tab(1, "example.com"));
+        state.tabs[0].active_pane = Pane::ALL.iter().position(|&p| p == Pane::Geo).unwrap();
+
+        let backend = TestBackend::new(100, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| draw(frame, &state)).unwrap();
+
+        let content = buffer_to_string(terminal.backend().buffer());
+        assert_eq!(
+            content.matches("GeoIP: 3h old").count(),
+            2,
+            "expected the status text once on the status line and once in the Geo pane: {content}"
         );
     }
 

@@ -220,6 +220,17 @@ pub struct AppState {
     /// tests exercising the settings flow never touch the user's real
     /// config file.
     pub config_path: Option<PathBuf>,
+    /// Live status of the GeoLite2 background downloader (see
+    /// `crate::geoip`), read by the Geo pane and the status line's
+    /// bottom-right corner. Global rather than per-tab: the underlying
+    /// database files are shared by every tab.
+    pub geoip: crate::geoip::GeoipStatus,
+    /// Set by `app::run` once the background updater is spawned, so a
+    /// settings-editor commit can push the new config to it immediately
+    /// (see `handle_settings_action`) instead of it waiting out however
+    /// much of its current sleep is left. `None` in tests, which don't
+    /// run the background task at all.
+    geoip_config_tx: Option<tokio::sync::watch::Sender<Arc<Config>>>,
     next_tab_id: AtomicU64,
 }
 
@@ -235,7 +246,39 @@ impl AppState {
             data_age_warning: None,
             last_resolver: None,
             config_path: Config::default_path().ok(),
+            geoip: crate::geoip::GeoipStatus::default(),
+            geoip_config_tx: None,
             next_tab_id: AtomicU64::new(1),
+        }
+    }
+
+    /// Applies a status update or refresh signal from the GeoLite2
+    /// background updater (`crate::geoip::run_background_updater`).
+    fn apply_geoip_event(
+        &mut self,
+        event: crate::geoip::GeoipEvent,
+        sender: &mpsc::Sender<CheckEvent>,
+    ) {
+        match event {
+            crate::geoip::GeoipEvent::Status(status) => self.geoip = status,
+            crate::geoip::GeoipEvent::Refreshed => {
+                // Freshly downloaded databases don't apply to an
+                // already-open tab's Geo pane until its check runs
+                // again -- do that now instead of leaving a stale "not
+                // downloaded yet" until the user presses 'r'.
+                for tab in &self.tabs {
+                    self.spawn_one_check(
+                        CheckId::Geo,
+                        tab.id,
+                        tab.target.clone(),
+                        tab.cancel.clone(),
+                        tab.shared.clone(),
+                        tab.resolver,
+                        tab.ping_paused.clone(),
+                        sender.clone(),
+                    );
+                }
+            }
         }
     }
 
@@ -535,6 +578,9 @@ impl AppState {
                                     .as_ref()
                                     .and_then(|path| draft.save(path).err());
                                 self.config = Arc::new((*draft).clone());
+                                if let Some(tx) = &self.geoip_config_tx {
+                                    let _ = tx.send(self.config.clone());
+                                }
                                 message = Some(match (&self.config_path, write_err) {
                                     (None, _) => "saved for this session only (no config directory for this platform)".to_string(),
                                     (Some(_), Some(err)) => format!("applied for this session, but failed to save: {err}"),
@@ -1003,6 +1049,18 @@ pub async fn run(
 
     let (check_tx, mut check_rx) = mpsc::channel::<CheckEvent>(1024);
     let mut state = AppState::new(config, providers);
+
+    let (geoip_config_tx, geoip_config_rx) = tokio::sync::watch::channel(state.config.clone());
+    state.geoip_config_tx = Some(geoip_config_tx);
+    let (geoip_event_tx, mut geoip_event_rx) = mpsc::unbounded_channel();
+    if let Some(geoip_cache_dir) = crate::geoip::cache_dir() {
+        tokio::spawn(crate::geoip::run_background_updater(
+            geoip_config_rx,
+            geoip_event_tx,
+            geoip_cache_dir,
+        ));
+    }
+
     for target in initial_targets {
         // CLI-provided hosts skip the interactive resolver prompt (there's
         // no prompt to show before the terminal is even drawn); the
@@ -1023,6 +1081,9 @@ pub async fn run(
             }
             Some(check_event) = check_rx.recv() => {
                 state.apply_check_event(check_event);
+            }
+            Some(geoip_event) = geoip_event_rx.recv() => {
+                state.apply_geoip_event(geoip_event, &check_tx);
             }
         }
 

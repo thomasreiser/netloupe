@@ -28,22 +28,40 @@ pub struct SettingField {
 pub fn fields() -> Vec<SettingField> {
     vec![
         SettingField {
-            label: "GeoLite2 City DB path",
-            help: "blank to disable Geo pane city/region lookups",
-            get: |c| path_get(&c.geoip.city_db),
+            label: "MaxMind account ID",
+            help: "blank to disable Geo pane lookups; from your MaxMind account's license-key page",
+            get: |c| {
+                c.geoip
+                    .account_id
+                    .map(|id| id.to_string())
+                    .unwrap_or_default()
+            },
             set: |c, v| {
-                c.geoip.city_db = path_set(v);
+                let trimmed = v.trim();
+                c.geoip.account_id = if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed.parse::<u32>().map_err(|_| {
+                        format!("{trimmed:?} isn't a valid MaxMind account ID (a plain number)")
+                    })?)
+                };
                 Ok(())
             },
         },
         SettingField {
-            label: "GeoLite2 ASN DB path",
-            help: "blank to disable Geo pane ASN-via-GeoIP lookups",
-            get: |c| path_get(&c.geoip.asn_db),
+            label: "MaxMind license key",
+            help: "blank to disable; generated alongside the account ID on maxmind.com",
+            get: |c| c.geoip.license_key.clone().unwrap_or_default(),
             set: |c, v| {
-                c.geoip.asn_db = path_set(v);
+                c.geoip.license_key = string_set(v);
                 Ok(())
             },
+        },
+        SettingField {
+            label: "GeoLite2 update interval",
+            help: "e.g. \"4h\", \"1day\", \"7days\" -- how often the databases are refreshed",
+            get: |c| duration_get(c.geoip.update_interval),
+            set: |c, v| duration_set(v).map(|d| c.geoip.update_interval = d),
         },
         SettingField {
             label: "Extra signature directory",
@@ -259,11 +277,31 @@ mod tests {
     #[test]
     fn path_fields_treat_blank_as_none() {
         let mut c = Config::default();
-        c.geoip.city_db = Some("/tmp/city.mmdb".into());
-        let field = &fields()[0];
-        assert_eq!((field.get)(&c), "/tmp/city.mmdb");
+        c.hosting.extra_signature_dir = Some("/tmp/sigs".into());
+        let field = fields()
+            .into_iter()
+            .find(|f| f.label == "Extra signature directory")
+            .unwrap();
+        assert_eq!((field.get)(&c), "/tmp/sigs");
         (field.set)(&mut c, "  ").unwrap();
-        assert!(c.geoip.city_db.is_none());
+        assert!(c.hosting.extra_signature_dir.is_none());
+    }
+
+    #[test]
+    fn maxmind_account_id_rejects_non_numeric_input_and_accepts_blank() {
+        let field = fields()
+            .into_iter()
+            .find(|f| f.label == "MaxMind account ID")
+            .unwrap();
+        let mut c = Config::default();
+        assert!((field.set)(&mut c, "not a number").is_err());
+        assert!(c.geoip.account_id.is_none());
+
+        (field.set)(&mut c, "12345").unwrap();
+        assert_eq!(c.geoip.account_id, Some(12345));
+
+        (field.set)(&mut c, "  ").unwrap();
+        assert!(c.geoip.account_id.is_none());
     }
 
     #[test]

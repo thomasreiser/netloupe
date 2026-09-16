@@ -29,7 +29,7 @@ use super::theme;
 use crate::app::{CheckStatus, Pane, TabState};
 use crate::checks::CheckId;
 
-pub fn render(frame: &mut Frame, area: Rect, tab: &TabState) {
+pub fn render(frame: &mut Frame, area: Rect, tab: &TabState, geoip: &crate::geoip::GeoipStatus) {
     let pane = Pane::ALL
         .get(tab.active_pane)
         .copied()
@@ -44,7 +44,7 @@ pub fn render(frame: &mut Frame, area: Rect, tab: &TabState) {
         Pane::Http => http::render(frame, area, tab),
         Pane::IpAsn => ipasn::render(frame, area, tab),
         Pane::Hosting => hosting::render(frame, area, tab),
-        Pane::Geo => geo::render(frame, area, tab),
+        Pane::Geo => geo::render(frame, area, tab, geoip),
         Pane::Rep => rep::render(frame, area, tab),
     }
 }

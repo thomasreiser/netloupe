@@ -8,6 +8,7 @@ pub mod app;
 pub mod checks;
 pub mod config;
 pub mod event;
+pub mod geoip;
 pub mod providers;
 pub mod settings;
 pub mod target;

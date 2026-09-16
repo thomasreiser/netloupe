@@ -66,8 +66,12 @@ globset = "0.4"
 regex = "1"
 idna = "1"
 
-# GeoIP
+# GeoIP. `flate2`/`tar` extract the `.mmdb` out of the tar.gz MaxMind's
+# GeoIP Update download API returns; `rust_backend` keeps flate2 pure-Rust
+# (no system zlib) per this project's "avoid non-Rust build deps" rule.
 maxminddb = "0.32"
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+tar = "0.4"
 
 # CLI / config
 clap = { version = "4", features = ["derive"] }
