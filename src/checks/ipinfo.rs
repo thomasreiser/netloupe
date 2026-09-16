@@ -47,6 +47,18 @@ impl IpClass {
             IpClass::Global => "global unicast",
         }
     }
+
+    /// True only for [`IpClass::Global`]: an address that's actually
+    /// routable on the public Internet, as opposed to RFC 1918/CGNAT/
+    /// loopback/link-local/documentation/benchmarking/reserved/multicast/
+    /// unspecified space. Every other check that depends on public
+    /// Internet infrastructure (ASN/RDAP lookups, hosting-provider
+    /// detection, GeoIP, DNSBL/reputation lists) uses this to skip work
+    /// that can't produce a meaningful answer for a local address, rather
+    /// than making the call anyway and reporting a confusing "not found".
+    pub fn is_global(self) -> bool {
+        matches!(self, IpClass::Global)
+    }
 }
 
 /// Origin ASN info for one IP, as reported by Team Cymru's DNS-based
@@ -97,14 +109,21 @@ pub(crate) async fn run(ctx: CheckContext, tx: mpsc::Sender<CheckEvent>) {
             errors: Vec::new(),
         };
 
-        match lookup_asn(ip, ctx.config.timeouts.dns).await {
-            Ok(asn) => result.asn = asn,
-            Err(err) => result.errors.push(format!("ASN lookup: {err}")),
-        }
+        // A private/loopback/link-local/etc. address has no public origin
+        // AS, no RDAP registration, and isn't announced anywhere — running
+        // these lookups against it would just query public infrastructure
+        // about an address it has never heard of. `class` (rendered by the
+        // pane) already says exactly what kind of local address this is.
+        if result.class.is_global() {
+            match lookup_asn(ip, ctx.config.timeouts.dns).await {
+                Ok(asn) => result.asn = asn,
+                Err(err) => result.errors.push(format!("ASN lookup: {err}")),
+            }
 
-        match lookup_rdap(ip, ctx.config.timeouts.rdap).await {
-            Ok(rdap) => result.rdap = Some(rdap),
-            Err(err) => result.errors.push(format!("RDAP: {err}")),
+            match lookup_rdap(ip, ctx.config.timeouts.rdap).await {
+                Ok(rdap) => result.rdap = Some(rdap),
+                Err(err) => result.errors.push(format!("RDAP: {err}")),
+            }
         }
 
         ctx.shared.set_ipinfo(result.clone()).await;
@@ -323,7 +342,54 @@ fn extract_vcard_email(entity: &Value) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use tokio::sync::mpsc;
+    use tokio_util::sync::CancellationToken;
+
     use super::*;
+    use crate::checks::{CheckContext, SharedResultsHandle};
+    use crate::config::Config;
+    use crate::event::CheckPayload;
+    use crate::providers::ProviderDb;
+    use crate::target::Target;
+
+    /// A private-address target has no public ASN or RDAP registration, so
+    /// the check must skip both lookups entirely (rather than querying
+    /// public infrastructure about an address it has never heard of) and
+    /// still report `Done` with a clear class instead of `asn`/`rdap`.
+    #[tokio::test]
+    async fn skips_asn_and_rdap_lookups_for_a_private_address() {
+        let ctx = CheckContext {
+            tab_id: 0,
+            target: Target::Ip("172.16.5.5".parse().unwrap()),
+            port: None,
+            config: Arc::new(Config::default()),
+            cancel: CancellationToken::new(),
+            shared: SharedResultsHandle::new(),
+            providers: Arc::new(ProviderDb::default()),
+        };
+        let (tx, mut rx) = mpsc::channel(8);
+        run(ctx, tx).await;
+
+        let mut done = None;
+        while let Some(event) = rx.recv().await {
+            if let CheckPayload::Done(CheckUpdate::IpInfo(info)) = event.payload {
+                done = Some(info);
+                break;
+            }
+        }
+        let info = done.expect("ipinfo check must report Done even when it skips ASN/RDAP");
+
+        assert_eq!(info.class, IpClass::Private);
+        assert!(info.asn.is_none());
+        assert!(info.rdap.is_none());
+        assert!(
+            info.errors.is_empty(),
+            "skipping isn't an error: {:?}",
+            info.errors
+        );
+    }
 
     #[test]
     fn classifies_private_v4() {
@@ -359,6 +425,28 @@ mod tests {
             classify("2606:4700:4700::1111".parse().unwrap()),
             IpClass::Global
         );
+    }
+
+    #[test]
+    fn only_global_is_considered_globally_routable() {
+        assert!(IpClass::Global.is_global());
+        for class in [
+            IpClass::Private,
+            IpClass::CarrierGradeNat,
+            IpClass::Loopback,
+            IpClass::LinkLocal,
+            IpClass::Multicast,
+            IpClass::Broadcast,
+            IpClass::Documentation,
+            IpClass::Unspecified,
+            IpClass::Benchmarking,
+            IpClass::Reserved,
+        ] {
+            assert!(
+                !class.is_global(),
+                "{class:?} must not be treated as globally routable"
+            );
+        }
     }
 
     #[test]

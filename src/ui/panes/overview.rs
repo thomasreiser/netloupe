@@ -123,15 +123,32 @@ fn target_lines(tab: &TabState) -> Vec<Line<'static>> {
 fn network_lines(tab: &TabState) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     if let Some(CheckUpdate::IpInfo(info)) = &tab.slot(CheckId::IpInfo).update {
-        match &info.asn {
-            Some(asn) => {
-                lines.push(kv("ASN", format!("AS{}", asn.asn)));
-                lines.push(kv("Org", asn.as_name.clone().unwrap_or_else(dash)));
-                lines.push(kv("Registry", asn.registry.clone()));
+        if info.class.is_global() {
+            match &info.asn {
+                Some(asn) => {
+                    lines.push(kv("ASN", format!("AS{}", asn.asn)));
+                    lines.push(kv("Org", asn.as_name.clone().unwrap_or_else(dash)));
+                    lines.push(kv("Registry", asn.registry.clone()));
+                }
+                None => lines.push(kv("ASN", "unknown")),
             }
-            None => lines.push(kv("ASN", "unknown")),
+            lines.push(kv("Class", info.class.label()));
+        } else {
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!("{:<11}", "Class"),
+                    Style::default()
+                        .fg(theme::LABEL)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                theme::pill("LOCAL", theme::BLUE),
+                Span::styled(
+                    format!(" {}", info.class.label()),
+                    Style::default().fg(theme::TEXT),
+                ),
+            ]));
+            lines.push(kv("ASN", "n/a"));
         }
-        lines.push(kv("Class", info.class.label()));
     } else {
         lines.push(kv("ASN", "..."));
     }
@@ -158,7 +175,15 @@ fn hosting_lines(tab: &TabState) -> Vec<Line<'static>> {
             }
         }
         if lines.is_empty() {
-            lines.push(kv("Provider", "none detected"));
+            let is_local = matches!(&tab.slot(CheckId::IpInfo).update, Some(CheckUpdate::IpInfo(info)) if !info.class.is_global());
+            if is_local {
+                lines.push(Line::from(vec![
+                    theme::pill("LOCAL", theme::BLUE),
+                    Span::styled(" no public provider", Style::default().fg(theme::TEXT)),
+                ]));
+            } else {
+                lines.push(kv("Provider", "none detected"));
+            }
         }
     } else {
         lines.push(kv("Provider", "..."));
@@ -228,7 +253,13 @@ fn location_lines(tab: &TabState) -> Vec<Line<'static>> {
             lines.push(kv("Timezone", tz.clone()));
         }
         if lines.is_empty() {
-            lines.push(kv("Geo", "no database configured"));
+            lines.push(kv(
+                "Geo",
+                geo.errors
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(|| "no data".to_string()),
+            ));
         }
     } else {
         lines.push(kv("Geo", "..."));

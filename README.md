@@ -40,16 +40,16 @@ see `Config` in `src/config.rs` for every field and its default).
 
 ## Keybindings
 
-| Key | Action |
-|---|---|
-| `Ctrl+t` / `Ctrl+w` | New tab / close tab |
-| `Tab` / `Shift+Tab` | Next / previous host tab |
-| `1`–`9`, `0`, `-` or `←` `→` | Switch pane |
-| `r` | Re-run checks for the current pane |
-| `R` | Re-run all checks for the current host |
-| `e` | Toggle evidence details (Hosting pane) |
-| `?` | Help overlay |
-| `q` | Quit |
+| Key                          | Action                                 |
+| ---------------------------- | -------------------------------------- |
+| `Ctrl+t` / `Ctrl+w`          | New tab / close tab                    |
+| `Tab` / `Shift+Tab`          | Next / previous host tab               |
+| `1`–`9`, `0`, `-` or `←` `→` | Switch pane                            |
+| `r`                          | Re-run checks for the current pane     |
+| `R`                          | Re-run all checks for the current host |
+| `e`                          | Toggle evidence details (Hosting pane) |
+| `?`                          | Help overlay                           |
+| `q`                          | Quit                                   |
 
 ## Development
 
