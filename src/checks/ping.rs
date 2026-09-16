@@ -1,9 +1,13 @@
 //! Ping pane (the "Ping" half of Ping/Trace): ICMP echo when the OS allows
 //! an unprivileged socket, degrading to a TCP-connect ping otherwise.
 //!
-//! Streams one `Progress` event per sample so the UI's sparkline updates
-//! live, then a final `Done` once the sample budget is spent. `r` re-runs
-//! the check for another batch.
+//! Runs continuously (like `ping` itself) rather than a fixed batch,
+//! streaming one `Progress` event per sample so the UI's sparkline keeps
+//! updating live for as long as the tab/pane is open; only cancellation
+//! (closing the tab, `r`/`R` re-running it, or headless mode's overall
+//! deadline) stops it. The sample history kept for the sparkline is
+//! capped (`MAX_SAMPLES_KEPT`) so an hours-long session doesn't grow
+//! `PingUpdate` unbounded -- older samples roll off the front.
 
 use std::net::IpAddr;
 use std::time::{Duration, Instant};
@@ -51,6 +55,14 @@ pub struct PingUpdate {
 
 impl PingUpdate {
     fn recompute_stats(&mut self) {
+        // Both derived from the (windowed) `samples` list, not tracked as
+        // separate ever-growing counters: with `run` now pinging
+        // continuously rather than in one bounded batch, an unwindowed
+        // `sent` would keep climbing forever while `received`/`samples`
+        // stay capped at `MAX_SAMPLES_KEPT`, making the loss percentage
+        // drift toward "all loss" over a long session regardless of
+        // actual recent connectivity.
+        self.sent = self.samples.len() as u32;
         let rtts: Vec<Duration> = self.samples.iter().filter_map(|s| s.rtt).collect();
         self.received = rtts.len() as u32;
         self.min = rtts.iter().min().copied();
@@ -63,10 +75,10 @@ impl PingUpdate {
     }
 }
 
-/// How many probes one run sends before stopping (the user re-runs the
-/// pane with `r` for another batch). Keeps a headless `check --json` run
-/// bounded without needing a separate "interactive vs. one-shot" mode.
-const SAMPLES_PER_RUN: u32 = 10;
+/// How many recent samples the sparkline/stats keep; older ones roll off
+/// as new ones arrive so a long-running tab's `PingUpdate` stays bounded.
+/// At `PING_INTERVAL` below, 120 samples is ~84 seconds of history.
+const MAX_SAMPLES_KEPT: usize = 120;
 const PING_INTERVAL: Duration = Duration::from_millis(700);
 
 pub(crate) async fn run(ctx: CheckContext, tx: mpsc::Sender<CheckEvent>) {
@@ -122,7 +134,8 @@ pub(crate) async fn run(ctx: CheckContext, tx: mpsc::Sender<CheckEvent>) {
         fallback_reason,
     };
 
-    for seq in 0..SAMPLES_PER_RUN {
+    let mut seq: u32 = 0;
+    loop {
         if ctx.cancel.is_cancelled() {
             let _ = tx
                 .send(CheckEvent {
@@ -142,9 +155,12 @@ pub(crate) async fn run(ctx: CheckContext, tx: mpsc::Sender<CheckEvent>) {
             _ => None,
         };
 
-        update.sent += 1;
         update.samples.push(PingSample { seq, rtt });
+        if update.samples.len() > MAX_SAMPLES_KEPT {
+            update.samples.remove(0);
+        }
         update.recompute_stats();
+        seq = seq.wrapping_add(1);
 
         let payload = CheckPayload::Progress(CheckUpdate::Ping(update.clone()));
         if tx
@@ -167,14 +183,6 @@ pub(crate) async fn run(ctx: CheckContext, tx: mpsc::Sender<CheckEvent>) {
             }
         }
     }
-
-    let _ = tx
-        .send(CheckEvent {
-            tab_id: ctx.tab_id,
-            check: id,
-            payload: CheckPayload::Done(CheckUpdate::Ping(update)),
-        })
-        .await;
 }
 
 fn icmp_client_for(ip: IpAddr) -> std::io::Result<Client> {
@@ -256,6 +264,34 @@ mod tests {
         update.recompute_stats();
         assert_eq!(update.received, 0);
         assert!(update.avg.is_none());
+    }
+
+    /// `sent` must track the (windowed) sample count rather than an
+    /// ever-growing counter, or a long-running continuous ping's loss
+    /// percentage would drift toward "all loss" over time regardless of
+    /// actual recent connectivity, once old samples start rolling off.
+    #[test]
+    fn recompute_stats_derives_sent_from_the_windowed_sample_count() {
+        let mut update = PingUpdate {
+            target_ip: "127.0.0.1".parse().unwrap(),
+            method: PingMethod::Icmp,
+            samples: vec![
+                PingSample {
+                    seq: 0,
+                    rtt: Some(Duration::from_millis(5)),
+                },
+                PingSample { seq: 1, rtt: None },
+            ],
+            sent: 999, // stale, as if carried over from a much larger window
+            received: 0,
+            min: None,
+            max: None,
+            avg: None,
+            fallback_reason: None,
+        };
+        update.recompute_stats();
+        assert_eq!(update.sent, 2);
+        assert_eq!(update.received, 1);
     }
 
     #[tokio::test]
