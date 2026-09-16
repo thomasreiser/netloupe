@@ -59,8 +59,17 @@ impl CertificateAuthority {
         match self {
             CertificateAuthority::LetsEncrypt
             | CertificateAuthority::ZeroSsl
-            | CertificateAuthority::GoogleTrustServices
             | CertificateAuthority::BuypassGo => Some(CaKind::PublicAcme),
+            // Unlike Let's Encrypt (ACME is its *only* issuance path),
+            // Google Trust Services both runs a public ACME endpoint
+            // (used by e.g. GCP-managed certs) *and* issues to Google's
+            // own first-party domains through its own internal, non-ACME
+            // automation. A GTS-issued cert for google.com itself almost
+            // certainly took the latter path, so treating every GTS cert
+            // as "public ACME" the way Let's Encrypt's certs are would
+            // overclaim certainty about a protocol that may not have
+            // been involved at all.
+            CertificateAuthority::GoogleTrustServices => Some(CaKind::PossiblyAcme),
             CertificateAuthority::AmazonAcm
             | CertificateAuthority::MicrosoftAzure
             | CertificateAuthority::CloudflareManaged => Some(CaKind::ManagedInternal),
@@ -71,8 +80,14 @@ impl CertificateAuthority {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CaKind {
-    /// Issues via the public RFC 8555 ACME protocol (DNS-01/HTTP-01).
+    /// Issues via the public RFC 8555 ACME protocol (DNS-01/HTTP-01) —
+    /// and, for this CA, that's the *only* public issuance path, so a
+    /// wildcard SAN reliably implies DNS-01.
     PublicAcme,
+    /// Runs a public ACME endpoint but *also* issues certificates through
+    /// its own internal, non-ACME automation for its own domains — so
+    /// unlike `PublicAcme`, ACME having been used at all isn't a given.
+    PossiblyAcme,
     /// Automated, but validated and renewed through the provider's own
     /// internal mechanism rather than public ACME with a predictable
     /// challenge record name.
@@ -91,6 +106,10 @@ pub enum ChallengeHint {
     /// This CA doesn't do public RFC 8555 ACME with a predictable
     /// challenge location (AWS ACM, Azure, Cloudflare); see `note`.
     NotPublicAcme,
+    /// This CA runs public ACME but *also* issues outside it for its own
+    /// domains (Google Trust Services); whether ACME was used at all —
+    /// let alone which challenge — isn't established. See `note`.
+    UncertainAcmeUsage,
 }
 
 /// A live snapshot of whatever's currently at `_acme-challenge.<domain>`.
@@ -175,6 +194,12 @@ fn managed_internal_note(ca: &CertificateAuthority) -> Option<&'static str> {
             "Cloudflare validates and renews its edge/Universal SSL certificates internally once \
              a zone is proxied through it; there's no public DNS-01/HTTP-01 record to inspect.",
         ),
+        CertificateAuthority::GoogleTrustServices => Some(
+            "Google Trust Services issues certificates both via a public ACME endpoint (used by \
+             e.g. GCP-managed certs) and via Google's own internal automation for its own \
+             domains — a GTS-issued cert for a Google property most likely took the latter path, \
+             which leaves no public DNS-01/HTTP-01 record to inspect.",
+        ),
         _ => None,
     }
 }
@@ -201,6 +226,7 @@ pub async fn inspect(
     let challenge_hint = match kind {
         CaKind::PublicAcme if is_wildcard => ChallengeHint::Dns01Certain,
         CaKind::PublicAcme => ChallengeHint::EitherMethodPossible,
+        CaKind::PossiblyAcme => ChallengeHint::UncertainAcmeUsage,
         CaKind::ManagedInternal => ChallengeHint::NotPublicAcme,
     };
     let note = managed_internal_note(&authority);
@@ -214,7 +240,7 @@ pub async fn inspect(
         note,
     };
 
-    if kind == CaKind::PublicAcme {
+    if matches!(kind, CaKind::PublicAcme | CaKind::PossiblyAcme) {
         if let Some(domain) = domain {
             // A wildcard's own label doesn't carry a TXT record; the
             // challenge for `*.example.com` is proven at `example.com`.
@@ -430,6 +456,34 @@ mod tests {
             assert!(info.note.is_some());
             assert!(info.dns01.is_none());
             assert!(info.http01.is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn google_trust_services_is_uncertain_even_for_a_wildcard() {
+        // Unlike Let's Encrypt, GTS also issues to Google's own domains
+        // through its own internal, non-ACME automation, so a wildcard
+        // SAN alone can't make DNS-01 "certain" the way it does for a
+        // CA where ACME is the only public issuance path.
+        for sans in [
+            vec!["*.example.com".to_string()],
+            vec!["example.com".to_string()],
+        ] {
+            let info = inspect(
+                None,
+                &sans,
+                "C=US, O=Google Trust Services, CN=WE1",
+                Duration::from_millis(1),
+                Duration::from_millis(1),
+            )
+            .await
+            .unwrap();
+            assert_eq!(info.authority, CertificateAuthority::GoogleTrustServices);
+            assert_eq!(info.challenge_hint, ChallengeHint::UncertainAcmeUsage);
+            assert!(
+                info.note.is_some(),
+                "should explain the hybrid issuance path"
+            );
         }
     }
 

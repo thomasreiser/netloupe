@@ -72,7 +72,18 @@ pub fn render(frame: &mut Frame, area: Rect, tab: &TabState) {
     } else {
         0
     };
-    let table_height = rows.len() as u16 + 1;
+    // Cap the table's height rather than always requesting exactly what
+    // every row (SANs included — some certs carry dozens) would need:
+    // a large request here would starve the ACME panel below it of any
+    // space at all. Scrolling (via `tab.scroll`) reaches whatever rows
+    // don't fit rather than losing them off-screen.
+    let reserved_for_acme = if tls.acme.is_some() { 6 } else { 0 };
+    let max_table_height = body
+        .height
+        .saturating_sub(expiry_height)
+        .saturating_sub(reserved_for_acme)
+        .max(3);
+    let table_height = (rows.len() as u16 + 1).min(max_table_height);
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -101,7 +112,7 @@ pub fn render(frame: &mut Frame, area: Rect, tab: &TabState) {
         );
     }
 
-    frame.render_widget(crate::ui::widgets::kv_table::widget(&rows), chunks[1]);
+    crate::ui::widgets::kv_table::render(frame, chunks[1], &rows, tab.scroll);
 
     if let Some(acme) = &tls.acme {
         let block = theme::panel(
@@ -144,6 +155,18 @@ fn acme_lines(acme: &AcmeInfo) -> Vec<Line<'static>> {
                 lines.extend(http01_lines(http01));
             }
         }
+        ChallengeHint::UncertainAcmeUsage => {
+            if let Some(note) = acme.note {
+                lines.push(Line::from(Span::styled(
+                    note,
+                    Style::default().fg(theme::MUTED),
+                )));
+            }
+            lines.extend(dns01_lines(acme));
+            if let Some(http01) = &acme.http01 {
+                lines.extend(http01_lines(http01));
+            }
+        }
     }
 
     lines
@@ -160,6 +183,14 @@ fn method_line(acme: &AcmeInfo) -> Line<'static> {
             theme::MUTED,
         ),
         ChallengeHint::NotPublicAcme => ("not public ACME".to_string(), theme::BLUE),
+        ChallengeHint::UncertainAcmeUsage => (
+            if acme.is_wildcard {
+                "unclear whether ACME was used at all — if it was, DNS-01 is the only possibility (wildcard), but this CA also issues outside ACME".to_string()
+            } else {
+                "unclear whether ACME was used at all — this CA also issues outside ACME for its own domains".to_string()
+            },
+            theme::BLUE,
+        ),
     };
     Line::from(vec![
         label("Method"),

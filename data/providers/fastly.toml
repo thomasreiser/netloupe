@@ -12,9 +12,16 @@ default_layer = "edge"
 numbers = [54113]
 
 [[signal]]
+# `X-Served-By` is a generic caching-layer convention (Varnish popularized
+# it, and Fastly is Varnish-based) that plenty of self-hosted reverse
+# proxies also set for their own purposes with an arbitrary value (seen in
+# the wild: a plain hostname). Presence alone is too weak a signal, so
+# this also requires Fastly's actual value shape: one or more
+# comma-separated "cache-<datacenter+id>-<IATA airport code>" tokens.
 layer = "edge"
 type = "header"
 name = "x-served-by"
+value_regex = "(?i)^cache-[a-z0-9]+-[a-z]{3}(,\\s*cache-[a-z0-9]+-[a-z]{3})*$"
 weight = 50
 
 [[signal]]

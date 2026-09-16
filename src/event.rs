@@ -27,10 +27,19 @@ pub enum Action {
     Quit,
     /// Opens the alternative-hostname picker for the active tab.
     OpenAltNames,
+    /// Asks whether to run the opt-in NSEC zone walk for the active tab.
+    OpenZoneWalk,
     /// Moves the picker's selection up/down (also usable by any future
     /// selectable-list mode).
     SelectUp,
     SelectDown,
+    /// Scrolls the active pane's content, for panes whose content is
+    /// taller than the terminal (a long SAN list, a large DNS zone's
+    /// records, ...).
+    ScrollUp,
+    ScrollDown,
+    ScrollPageUp,
+    ScrollPageDown,
     /// Raw text typed into the "new host" prompt.
     InputChar(char),
     InputBackspace,
@@ -80,6 +89,7 @@ pub enum CheckUpdate {
     Trace(crate::checks::trace::TraceUpdate),
     Ports(crate::checks::ports::PortsUpdate),
     AltNames(crate::checks::altnames::AltNamesResult),
+    ZoneWalk(crate::checks::zonewalk::ZoneWalkResult),
     /// A pane that hasn't been wired up to a real check yet.
     NotImplemented,
 }

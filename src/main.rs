@@ -282,6 +282,7 @@ fn acme_json(acme: &netloupe::checks::acme::AcmeInfo) -> serde_json::Value {
         ChallengeHint::Dns01Certain => "dns01_certain",
         ChallengeHint::EitherMethodPossible => "either_method_possible",
         ChallengeHint::NotPublicAcme => "not_public_acme",
+        ChallengeHint::UncertainAcmeUsage => "uncertain_acme_usage",
     };
     json!({
         "authority": acme.authority.name(),
@@ -315,6 +316,15 @@ fn update_json(update: &CheckUpdate) -> serde_json::Value {
             "srv": d.srv,
             "ptr": d.ptr,
             "authenticated_data": d.authenticated_data,
+            "any_records": d.any_records,
+            "any_note": d.any_note,
+            "zone_signing": format!("{:?}", d.zone_signing),
+            "axfr": d.axfr.iter().map(|a| json!({
+                "nameserver": a.nameserver,
+                "succeeded": a.succeeded,
+                "record_count": a.record_count,
+                "detail": a.detail,
+            })).collect::<Vec<_>>(),
             "errors": d.errors,
         }),
         CheckUpdate::Ping(p) => json!({
@@ -390,6 +400,13 @@ fn update_json(update: &CheckUpdate) -> serde_json::Value {
                 "sources": n.sources.iter().map(|s| s.label()).collect::<Vec<_>>(),
             })).collect::<Vec<_>>(),
             "errors": a.errors,
+        }),
+        CheckUpdate::ZoneWalk(z) => json!({
+            "zone": z.zone,
+            "names": z.names,
+            "queries_made": z.queries_made,
+            "complete": z.complete,
+            "errors": z.errors,
         }),
         CheckUpdate::Trace(_) | CheckUpdate::NotImplemented => json!(null),
     }

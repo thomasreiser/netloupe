@@ -46,5 +46,5 @@ pub fn render(frame: &mut Frame, area: Rect, tab: &TabState) {
         })
         .collect();
 
-    frame.render_widget(crate::ui::widgets::kv_table::widget(&rows), body);
+    crate::ui::widgets::kv_table::render(frame, body, &rows, tab.scroll);
 }

@@ -109,7 +109,7 @@ pub fn render(frame: &mut Frame, area: Rect, tab: &TabState) {
         rows.push(("RDAP".to_string(), "n/a — local address".to_string()));
     }
 
-    frame.render_widget(crate::ui::widgets::kv_table::widget(&rows), chunks[1]);
+    crate::ui::widgets::kv_table::render(frame, chunks[1], &rows, tab.scroll);
     if !info.errors.is_empty() {
         frame.render_widget(errors_widget(&info.errors), chunks[2]);
     }

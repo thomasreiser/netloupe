@@ -27,7 +27,7 @@ Guidance for Claude Code when working in this repository.
 | # | Pane | Content |
 |---|---|---|
 | 1 | Overview | Dashboard: IPs, ASN, provider badges, country, ping sparkline, cert expiry, SPF/DMARC/DNSSEC status |
-| 2 | DNS | A/AAAA/CNAME/MX/NS/SOA/TXT/CAA/SRV/PTR, DNSSEC chain, resolver comparison, delegation trace |
+| 2 | DNS | A/AAAA/CNAME/MX/NS/SOA/TXT/CAA/SRV/PTR, DNSSEC chain, resolver comparison, delegation trace, AXFR/ANY attempts, NSEC/NSEC3 zone-signing detection, CT-log subdomains (reused from Alt. hosts), opt-in full NSEC zone walk |
 | 3 | Mail | SPF (flattened, lookup count), DMARC, DKIM (common selectors), MTA-STS, TLS-RPT, BIMI, SMTP banner/STARTTLS |
 | 4 | Ping/Trace | ICMP + TCP ping with live sparkline, MTR-style traceroute with ASN/provider per hop |
 | 5 | Ports | Opt-in scan of a configurable port list, banners |
@@ -302,9 +302,12 @@ Config lives at `$XDG_CONFIG_HOME/netloupe/config.toml`. Every option has a sens
 | `Ctrl+t` / `Ctrl+w` | New tab / close tab |
 | `Tab` / `Shift+Tab` | Next / previous host tab |
 | `1`–`9`, `0`, `-` or `←` `→` | Switch pane |
+| `↑`/`↓`, `PgUp`/`PgDn` | Scroll the current pane's content |
 | `r` | Re-run checks for the current pane |
 | `R` | Re-run all checks for the current host |
 | `e` | Toggle evidence details (Hosting pane) |
+| `a` | Open the alternative-hostname picker (Overview) |
+| `w` | Walk an NSEC-signed zone for its full name list (DNS) |
 | `y` | Copy the current pane as text |
 | `?` | Help overlay |
 | `q` | Quit |

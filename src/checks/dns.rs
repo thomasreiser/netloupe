@@ -9,10 +9,16 @@
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::time::Duration;
 
-use hickory_proto::rr::{RData, Record, RecordType};
+use hickory_proto::dnssec::rdata::DNSSECRData;
+use hickory_proto::op::{Message, Query, ResponseCode};
+use hickory_proto::rr::{Name, RData, Record, RecordType};
+use hickory_proto::serialize::binary::BinEncodable;
 use hickory_resolver::config::{NameServerConfig, ResolverConfig};
 use hickory_resolver::net::runtime::TokioRuntimeProvider;
+use hickory_resolver::net::{DnsError, NetError};
 use hickory_resolver::{Resolver, TokioResolver};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 
 use super::CheckContext;
@@ -62,10 +68,53 @@ pub struct DnsResult {
     /// flag. A hint that DNSSEC validation happened upstream, not proof: we
     /// don't walk the trust chain ourselves yet.
     pub authenticated_data: bool,
+    /// A `QTYPE=ANY` query's answers, rendered `TYPE value`. Usually empty
+    /// or minimal even for a fully-populated zone — see `any_note`.
+    pub any_records: Vec<String>,
+    /// Set when `any_records` came back empty/minimal, explaining why
+    /// that's normal rather than a failure.
+    pub any_note: Option<&'static str>,
+    /// Whether (and how) the zone uses DNSSEC denial-of-existence, learned
+    /// by probing a name that shouldn't exist. `Nsec` means the zone can
+    /// be walked name-by-name (see `checks::zonewalk`); `Nsec3` means it
+    /// can't, without offline hash-cracking this tool doesn't attempt.
+    pub zone_signing: ZoneSigning,
+    /// One zone-transfer attempt per authoritative nameserver. Almost
+    /// always refused (that's the secure, expected configuration) —
+    /// `succeeded: true` on any of these is a real misconfiguration worth
+    /// flagging prominently.
+    pub axfr: Vec<AxfrAttempt>,
     /// One message per record type that failed to resolve (NXDOMAIN, a
     /// timeout, ...). Never fatal: a domain with no MX records still shows
     /// its A/NS/TXT records fine.
     pub errors: Vec<String>,
+}
+
+/// What a probe for a deliberately nonexistent name under the zone
+/// revealed about its DNSSEC denial-of-existence method.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ZoneSigning {
+    /// The probe didn't clearly show NSEC or NSEC3 (unsigned zone, or an
+    /// inconclusive/failed probe).
+    #[default]
+    NotSignedOrUnknown,
+    /// RFC 4034 NSEC: each denial-of-existence response names the next
+    /// real name in the zone in canonical order, so the whole zone can be
+    /// enumerated by repeatedly following that chain.
+    Nsec,
+    /// RFC 5155 NSEC3: denial-of-existence uses hashed owner names, so
+    /// walking the zone this way isn't possible without cracking those
+    /// hashes offline — out of scope for a passive diagnostic tool.
+    Nsec3,
+}
+
+/// One nameserver's response to an AXFR (zone transfer) attempt.
+#[derive(Debug, Clone)]
+pub struct AxfrAttempt {
+    pub nameserver: String,
+    pub succeeded: bool,
+    pub record_count: usize,
+    pub detail: String,
 }
 
 /// A hostname's IPs as seen by the system resolver vs. a comparison
@@ -116,6 +165,11 @@ async fn resolve_host(name: &str, timeout: Duration) -> DnsResult {
     };
 
     fill_forward_records(&resolver, name, &mut result).await;
+
+    fill_any_query(&resolver, name, &mut result).await;
+    result.zone_signing = detect_zone_signing(name, timeout).await;
+    result.axfr = attempt_axfr_all(name, &result.ns, timeout).await;
+
     result
 }
 
@@ -252,6 +306,222 @@ async fn fill_forward_records(resolver: &TokioResolver, name: &str, result: &mut
     }
 }
 
+/// A `QTYPE=ANY` query. Kept separate from `fill_forward_records`'s
+/// per-type lookups since this is a single extra query, not a record type
+/// of its own, and its "usually near-empty" result needs its own
+/// explanation (RFC 8482) rather than looking like every other row.
+async fn fill_any_query(resolver: &TokioResolver, name: &str, result: &mut DnsResult) {
+    match resolver.lookup(name, RecordType::ANY).await {
+        Ok(lookup) => {
+            result.any_records = lookup
+                .answers()
+                .iter()
+                .map(|r| format!("{:?} {}", r.record_type(), r.data))
+                .collect();
+            if result.any_records.is_empty() {
+                result.any_note = Some(
+                    "empty — most nameservers now restrict ANY to a minimal/synthetic response (RFC 8482), to curb its use in DNS amplification attacks",
+                );
+            }
+        }
+        // A nameserver refusing ANY outright (NotImp/Refused) is at least
+        // as common today as a minimal reply, per RFC 8482 — expected
+        // behavior, not a failure, so it gets the same explanatory note
+        // rather than cluttering `errors` with something to worry about.
+        Err(NetError::Dns(DnsError::ResponseCode(
+            ResponseCode::NotImp | ResponseCode::Refused,
+        ))) => {
+            result.any_note = Some(
+                "refused — most nameservers now decline ANY entirely or restrict it to a minimal/synthetic response (RFC 8482), to curb its use in DNS amplification attacks",
+            );
+        }
+        Err(err) => result.errors.push(format!("ANY: {err}")),
+    }
+}
+
+/// Probes a name that should never exist under this zone and inspects the
+/// resulting NXDOMAIN's authority section for an NSEC or NSEC3 record,
+/// revealing which denial-of-existence method (if either) the zone uses.
+/// Pure protocol observation — this alone doesn't enumerate anything.
+async fn detect_zone_signing(name: &str, timeout: Duration) -> ZoneSigning {
+    let Ok(resolver) = dnssec_probe_resolver(timeout) else {
+        return ZoneSigning::NotSignedOrUnknown;
+    };
+    // Trailing dot: an absolute name, so the resolver queries it as-is
+    // instead of also trying it with the local search domain appended
+    // (which would probe a name under the *search domain's* zone, not
+    // this one, and misreport its signing status entirely).
+    let probe = format!("_netloupe-nsec-probe.{}.", name.trim_end_matches('.'));
+    match resolver.lookup(probe.as_str(), RecordType::A).await {
+        // The probe name surprisingly exists; not informative either way.
+        Ok(_) => ZoneSigning::NotSignedOrUnknown,
+        Err(err) => classify_nsec_error(&err),
+    }
+}
+
+fn classify_nsec_error(err: &NetError) -> ZoneSigning {
+    // A validating resolver (`dnssec_probe_resolver` turns this on) that
+    // confirms the negative response is DNSSEC-signed reports it through
+    // this dedicated variant instead of the plain `NoRecordsFound` a
+    // non-validating lookup would get — the raw NSEC/NSEC3 records are
+    // still in `response`'s authority section either way.
+    let authorities: &[Record] = match err {
+        NetError::Dns(DnsError::Nsec { response, .. }) => &response.authorities,
+        NetError::Dns(DnsError::NoRecordsFound(no_records)) => match &no_records.authorities {
+            Some(authorities) => authorities,
+            None => return ZoneSigning::NotSignedOrUnknown,
+        },
+        _ => return ZoneSigning::NotSignedOrUnknown,
+    };
+
+    let mut saw_nsec3 = false;
+    let mut saw_nsec = false;
+    for record in authorities {
+        match &record.data {
+            RData::DNSSEC(DNSSECRData::NSEC3(_)) => saw_nsec3 = true,
+            RData::DNSSEC(DNSSECRData::NSEC(_)) => saw_nsec = true,
+            _ => {}
+        }
+    }
+    // NSEC3 takes precedence if somehow both appear: it's the stricter
+    // (non-walkable) case, and misreporting the safer one would be worse.
+    if saw_nsec3 {
+        ZoneSigning::Nsec3
+    } else if saw_nsec {
+        ZoneSigning::Nsec
+    } else {
+        ZoneSigning::NotSignedOrUnknown
+    }
+}
+
+/// How many authoritative nameservers to try AXFR against; a zone rarely
+/// has more than a handful, and each attempt already fails fast (REFUSED
+/// arrives in the very first response) except in the rare success case.
+const AXFR_NAMESERVER_CAP: usize = 4;
+/// Safety bounds on a *successful* transfer, so an unusually permissive
+/// nameserver with a huge zone can't make this check run unbounded.
+const AXFR_MAX_MESSAGES: usize = 200;
+const AXFR_MAX_RECORDS: usize = 5_000;
+
+async fn attempt_axfr_all(zone: &str, ns_names: &[String], timeout: Duration) -> Vec<AxfrAttempt> {
+    let mut attempts = Vec::new();
+    for ns_name in ns_names.iter().take(AXFR_NAMESERVER_CAP) {
+        let ns_host = ns_name.trim_end_matches('.').to_string();
+        let ip = match resolve_addrs(&ns_host, timeout).await {
+            Ok(ips) => ips
+                .iter()
+                .find(|ip| ip.is_ipv4())
+                .or_else(|| ips.first())
+                .copied(),
+            Err(_) => None,
+        };
+        let Some(ip) = ip else {
+            attempts.push(AxfrAttempt {
+                nameserver: ns_host,
+                succeeded: false,
+                record_count: 0,
+                detail: "could not resolve this nameserver's own address".to_string(),
+            });
+            continue;
+        };
+        attempts.push(attempt_axfr_one(zone, &ns_host, ip, timeout).await);
+    }
+    attempts
+}
+
+async fn attempt_axfr_one(
+    zone: &str,
+    ns_host: &str,
+    ns_ip: IpAddr,
+    timeout: Duration,
+) -> AxfrAttempt {
+    // AXFR is a bulk operation by nature; give a successful (permitted)
+    // transfer more room than a single lookup's usual timeout, while still
+    // bailing out of a REFUSED-but-slow-to-close connection reasonably
+    // promptly.
+    let axfr_timeout = timeout.max(Duration::from_secs(5));
+    match tokio::time::timeout(axfr_timeout, do_axfr(zone, ns_ip)).await {
+        Ok(Ok(count)) => AxfrAttempt {
+            nameserver: ns_host.to_string(),
+            succeeded: true,
+            record_count: count,
+            detail: "succeeded — this nameserver allows zone transfer to arbitrary clients, a real misconfiguration".to_string(),
+        },
+        Ok(Err(detail)) => AxfrAttempt { nameserver: ns_host.to_string(), succeeded: false, record_count: 0, detail },
+        Err(_) => AxfrAttempt { nameserver: ns_host.to_string(), succeeded: false, record_count: 0, detail: "timed out".to_string() },
+    }
+}
+
+/// Attempts an AXFR (RFC 5936) against one nameserver over raw TCP: almost
+/// every server refuses this from a client that isn't a configured
+/// secondary, in the very first response, so the common case is cheap.
+async fn do_axfr(zone: &str, ns_ip: IpAddr) -> Result<usize, String> {
+    let name: Name = zone
+        .parse()
+        .map_err(|e| format!("invalid zone name: {e}"))?;
+    let mut query = Message::query();
+    query.add_query(Query::query(name, RecordType::AXFR));
+    let bytes = query.to_bytes().map_err(|e| e.to_string())?;
+
+    let mut stream = TcpStream::connect((ns_ip, 53))
+        .await
+        .map_err(|e| format!("connect: {e}"))?;
+    // DNS-over-TCP messages are framed with a 2-byte big-endian length
+    // prefix (RFC 1035 §4.2.2), unlike UDP where the datagram boundary
+    // *is* the message boundary.
+    stream
+        .write_all(&(bytes.len() as u16).to_be_bytes())
+        .await
+        .map_err(|e| e.to_string())?;
+    stream.write_all(&bytes).await.map_err(|e| e.to_string())?;
+
+    let mut total_records = 0usize;
+    let mut soa_seen = 0u32;
+    let mut messages_read = 0usize;
+
+    loop {
+        let mut len_buf = [0u8; 2];
+        if stream.read_exact(&mut len_buf).await.is_err() {
+            break; // connection closed — typical of a refusal
+        }
+        let msg_len = u16::from_be_bytes(len_buf) as usize;
+        if msg_len == 0 {
+            break;
+        }
+        let mut msg_buf = vec![0u8; msg_len];
+        stream
+            .read_exact(&mut msg_buf)
+            .await
+            .map_err(|e| format!("connection closed mid-message: {e}"))?;
+        let message = Message::from_vec(&msg_buf).map_err(|e| e.to_string())?;
+
+        if messages_read == 0 && message.metadata.response_code != ResponseCode::NoError {
+            return Err(format!("{:?}", message.metadata.response_code));
+        }
+        messages_read += 1;
+
+        for record in &message.answers {
+            total_records += 1;
+            if record.record_type() == RecordType::SOA {
+                soa_seen += 1;
+            }
+        }
+
+        if soa_seen >= 2 || messages_read >= AXFR_MAX_MESSAGES || total_records >= AXFR_MAX_RECORDS
+        {
+            break;
+        }
+    }
+
+    if soa_seen < 2 {
+        return Err(
+            "REFUSED (or the connection closed before completing) — the expected, secure behavior"
+                .to_string(),
+        );
+    }
+    Ok(total_records)
+}
+
 fn classify_forward_record(record: &Record, result: &mut DnsResult) {
     match &record.data {
         RData::A(a) => result.a.push(a.0),
@@ -286,6 +556,20 @@ fn resolver_for(ip: IpAddr, timeout: Duration) -> Result<TokioResolver, String> 
 fn system_resolver(timeout: Duration) -> Result<TokioResolver, String> {
     let mut builder = TokioResolver::builder_tokio().map_err(|e| e.to_string())?;
     builder.options_mut().timeout = timeout;
+    builder.build().map_err(|e| e.to_string())
+}
+
+/// A resolver with DNSSEC validation turned on, used by
+/// `detect_zone_signing` and (via `checks::zonewalk`) the opt-in NSEC zone
+/// walk: both need the server to include RRSIG/NSEC/NSEC3 records (via the
+/// EDNS "DO" bit), which plain lookups don't request. Kept separate from
+/// `system_resolver` so a validation hiccup (a zone with a broken DNSSEC
+/// chain, a slow trust anchor fetch, ...) can only ever affect these DNSSEC
+/// probes, never the A/AAAA/MX/NS/... lookups every other check relies on.
+pub(crate) fn dnssec_probe_resolver(timeout: Duration) -> Result<TokioResolver, String> {
+    let mut builder = TokioResolver::builder_tokio().map_err(|e| e.to_string())?;
+    builder.options_mut().timeout = timeout;
+    builder.options_mut().validate = true;
     builder.build().map_err(|e| e.to_string())
 }
 
@@ -413,7 +697,61 @@ pub async fn lookup_cname(name: &str, timeout: Duration) -> Result<Option<String
 
 #[cfg(test)]
 mod tests {
+    use std::str::FromStr;
+
+    use hickory_proto::dnssec::rdata::nsec::NSEC;
+    use hickory_proto::op::Query;
+    use hickory_resolver::net::NoRecords;
+
     use super::*;
+
+    fn nsec_no_records(next_domain_name: &str) -> NetError {
+        let next = Name::from_str(next_domain_name).unwrap();
+        let nsec = NSEC::new_cover_self(next, [RecordType::A, RecordType::RRSIG, RecordType::NSEC]);
+        let record = Record::from_rdata(
+            Name::from_str("probe.example.com.").unwrap(),
+            300,
+            RData::DNSSEC(DNSSECRData::NSEC(nsec)),
+        );
+        let mut no_records = NoRecords::new(
+            Box::new(Query::query(
+                Name::from_str("probe.example.com.").unwrap(),
+                RecordType::A,
+            )),
+            ResponseCode::NXDomain,
+        );
+        no_records.authorities = Some(vec![record].into());
+        NetError::Dns(DnsError::NoRecordsFound(no_records))
+    }
+
+    #[test]
+    fn classifies_nsec_from_a_no_records_response() {
+        assert_eq!(
+            classify_nsec_error(&nsec_no_records("zzz.example.com.")),
+            ZoneSigning::Nsec
+        );
+    }
+
+    #[test]
+    fn classifies_unsigned_when_no_authorities_present() {
+        let query = Box::new(Query::query(
+            Name::from_str("probe.example.com.").unwrap(),
+            RecordType::A,
+        ));
+        let err = NetError::Dns(DnsError::NoRecordsFound(NoRecords::new(
+            query,
+            ResponseCode::NXDomain,
+        )));
+        assert_eq!(classify_nsec_error(&err), ZoneSigning::NotSignedOrUnknown);
+    }
+
+    #[test]
+    fn classifies_unrelated_errors_as_unknown() {
+        assert_eq!(
+            classify_nsec_error(&NetError::Busy),
+            ZoneSigning::NotSignedOrUnknown
+        );
+    }
 
     #[test]
     fn txt_chunks_join_without_separator() {

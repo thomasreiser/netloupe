@@ -1,5 +1,7 @@
 # netloupe
 
+![netloupe](netloupe.png)
+
 A terminal UI for inspecting hosts. Enter a hostname or IP; netloupe runs
 DNS, mail security, ping/traceroute, ports, TLS, HTTP, IP/ASN, hosting
 provider detection, geolocation, and reputation checks in parallel and
@@ -40,16 +42,20 @@ see `Config` in `src/config.rs` for every field and its default).
 
 ## Keybindings
 
-| Key                          | Action                                 |
-| ---------------------------- | -------------------------------------- |
-| `Ctrl+t` / `Ctrl+w`          | New tab / close tab                    |
-| `Tab` / `Shift+Tab`          | Next / previous host tab               |
-| `1`–`9`, `0`, `-` or `←` `→` | Switch pane                            |
-| `r`                          | Re-run checks for the current pane     |
-| `R`                          | Re-run all checks for the current host |
-| `e`                          | Toggle evidence details (Hosting pane) |
-| `?`                          | Help overlay                           |
-| `q`                          | Quit                                   |
+| Key                          | Action                                                |
+| ---------------------------- | ----------------------------------------------------- |
+| `Ctrl+t` / `Ctrl+w`          | New tab / close tab                                   |
+| `Tab` / `Shift+Tab`          | Next / previous host tab                              |
+| `1`–`9`, `0`, `-` or `←` `→` | Switch pane                                           |
+| `↑`/`↓`, `PgUp`/`PgDn`       | Scroll the current pane's content                     |
+| `r`                          | Re-run checks for the current pane                    |
+| `R`                          | Re-run all checks for the current host                |
+| `e`                          | Toggle evidence details (Hosting pane)                |
+| `a`                          | Open the alternative-hostname picker (Overview)       |
+| `w`                          | Walk an NSEC-signed zone for its full name list (DNS) |
+| `y`                          | Copy the current pane as text                         |
+| `?`                          | Help overlay                                          |
+| `q`                          | Quit                                                  |
 
 ## Development
 
