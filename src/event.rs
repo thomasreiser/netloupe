@@ -32,6 +32,9 @@ pub enum Action {
     ToggleEvidence,
     CopyPane,
     ToggleHelp,
+    /// Opens/closes the data-info popup (what was downloaded, when, from
+    /// where, and how big it is).
+    ToggleDataInfo,
     Quit,
     /// Opens the alternative-hostname picker for the active tab.
     OpenAltNames,

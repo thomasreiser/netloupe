@@ -1,17 +1,69 @@
-//! Downloads fresh range lists into `$XDG_CACHE_HOME/netloupe/ranges/`
-//! (the `netloupe update-data` command), using ETag/If-Modified-Since so
-//! unchanged sources cost the provider only a cheap 304.
+//! Downloads fresh range lists into `$XDG_CACHE_HOME/netloupe/ranges/`,
+//! using ETag/If-Modified-Since so unchanged sources cost the provider
+//! only a cheap 304. [`update_all`] is the one place this happens --
+//! both the `netloupe update-data` command and [`run_background_updater`]
+//! call it, so there's a single download/caching implementation to keep
+//! correct.
 //!
 //! Every source is independent: one provider's list moving or breaking
 //! never stops the others from refreshing (same principle as
 //! `providers::ranges::load`, which prefers whatever ends up in this
 //! cache directory over the bundled snapshot).
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::SystemTime;
+
+use tokio::sync::{mpsc, watch};
 
 use super::ranges::source_filename;
 use super::signatures::{self, SignatureLoadError};
+use super::ProviderDb;
+use crate::config::Config;
+use crate::refresh;
 use crate::retry::{self, Failure};
+
+/// `$XDG_CACHE_HOME/netloupe/ranges/`, where downloaded range-list files
+/// (plus their ETag/Last-Modified sidecars and the last-update marker)
+/// live. `None` only if this platform has no determinable cache directory
+/// at all.
+pub fn cache_dir() -> Option<PathBuf> {
+    let dirs = directories::ProjectDirs::from("", "", "netloupe")?;
+    Some(dirs.cache_dir().join("ranges"))
+}
+
+/// A zero-byte file touched by [`update_all`] every time it completes a
+/// full refresh (i.e. `only_provider` was `None`), so [`last_update`] has
+/// something to read without having to enumerate every provider's cache
+/// files, whose set changes as providers are added or removed.
+fn marker_path(cache_dir: &Path) -> PathBuf {
+    cache_dir.join(".last-update")
+}
+
+/// When `update_all` last completed a full refresh into `cache_dir`, read
+/// from the marker file's mtime. `None` if it's never run (fresh cache
+/// directory, or one that's only ever seen a single-provider refresh).
+pub fn last_update(cache_dir: &Path) -> Option<SystemTime> {
+    std::fs::metadata(marker_path(cache_dir))
+        .ok()?
+        .modified()
+        .ok()
+}
+
+/// When the range data currently in use was produced, and whether that's
+/// the bundled snapshot rather than a downloaded refresh: the cache's
+/// last full update if one has ever happened, otherwise the bundled
+/// snapshot's build time as a fallback -- either way, "how old is what
+/// Hosting detection is actually using right now".
+fn data_as_of(cache_dir: &Path) -> (Option<SystemTime>, bool) {
+    if let Some(t) = last_update(cache_dir) {
+        return (Some(t), false);
+    }
+    let snapshot_time = super::ranges::snapshot_generated_at().map(|dt| {
+        SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(dt.timestamp().max(0) as u64)
+    });
+    (snapshot_time, snapshot_time.is_some())
+}
 
 #[derive(Debug, Default)]
 pub struct UpdateReport {
@@ -61,7 +113,235 @@ pub async fn update_all(
         }
     }
 
+    if only_provider.is_none() {
+        // Best-effort: a failure to write the marker just means the next
+        // background check finds the cache "never updated" and retries
+        // sooner than strictly necessary, which is harmless.
+        let _ = std::fs::write(marker_path(cache_dir), b"");
+    }
+
     Ok(report)
+}
+
+/// Live status of the background updater. Global rather than per-tab
+/// (see `app::AppState::ranges`): the underlying cache is shared by every
+/// tab's Hosting check, so there's one status, not one per host.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RangesStatus {
+    pub downloading: bool,
+    /// When the range data actually in use was produced, and whether
+    /// that's the bundled snapshot rather than a downloaded refresh --
+    /// see [`data_as_of`].
+    pub data_as_of: Option<SystemTime>,
+    pub from_snapshot: bool,
+    /// Set when the most recent refresh attempt failed. Cleared on the
+    /// next success. Whatever's already cached (or the bundled snapshot)
+    /// stays in use underneath -- this doesn't mean "no data", just "no
+    /// newer data yet".
+    pub last_error: Option<String>,
+}
+
+impl RangesStatus {
+    /// A short one-line summary for the bottom-right of the status line.
+    pub fn status_text(&self) -> String {
+        if self.downloading {
+            return "Ranges: updating…".to_string();
+        }
+        match self.data_as_of {
+            Some(t) => {
+                let age = refresh::humanize_age(refresh::age_of(t));
+                if self.from_snapshot {
+                    format!("Ranges: {age} old (bundled snapshot)")
+                } else if self.last_error.is_some() {
+                    format!("Ranges: {age} old (refresh failed)")
+                } else {
+                    format!("Ranges: {age} old")
+                }
+            }
+            None if self.last_error.is_some() => "Ranges: download failed".to_string(),
+            None => "Ranges: pending".to_string(),
+        }
+    }
+}
+
+/// Sent from the background updater to the event loop.
+pub enum RangesEvent {
+    Status(RangesStatus),
+    /// A refresh just finished and the range-list cache changed, so the
+    /// provider database was reloaded from it -- already-open tabs'
+    /// Hosting checks should re-evaluate against `db` rather than sitting
+    /// on whatever they last computed until the user presses 'r'.
+    Refreshed(Arc<ProviderDb>),
+}
+
+/// Runs for the lifetime of the TUI. On every pass it checks whether the
+/// range-list cache is missing or older than
+/// `config.hosting.range_update_interval` and, if so, refreshes it via
+/// [`update_all`] (the same download path `netloupe update-data` uses)
+/// and reloads the provider database from the refreshed cache; then it
+/// sleeps until the next check is due -- or wakes early if `config_rx`
+/// reports a config change (e.g. the interval was just edited in the
+/// settings editor), rather than waiting out however much of the old
+/// interval happened to be left.
+pub async fn run_background_updater(
+    mut config_rx: watch::Receiver<Arc<Config>>,
+    event_tx: mpsc::UnboundedSender<RangesEvent>,
+    cache_dir: PathBuf,
+) {
+    let mut last_error: Option<String> = None;
+
+    loop {
+        let hosting_config = config_rx.borrow().hosting.clone();
+
+        if refresh::is_due(
+            last_update(&cache_dir),
+            hosting_config.range_update_interval,
+        ) {
+            let _ = event_tx.send(RangesEvent::Status(status(
+                &cache_dir,
+                true,
+                last_error.clone(),
+            )));
+            match update_all(&cache_dir, None).await {
+                Ok(report) => {
+                    if !report.failed.is_empty() {
+                        tracing::warn!(
+                            failed = report.failed.len(),
+                            refreshed = report.refreshed.len(),
+                            unchanged = report.unchanged.len(),
+                            "provider range update: some sources failed"
+                        );
+                    }
+                    last_error = None;
+                    if let Some(db) =
+                        reload_provider_db(hosting_config.extra_signature_dir.clone(), &cache_dir)
+                            .await
+                    {
+                        let _ = event_tx.send(RangesEvent::Refreshed(Arc::new(db)));
+                    }
+                }
+                Err(err) => {
+                    tracing::warn!(%err, "provider range update failed");
+                    last_error = Some(err.to_string());
+                }
+            }
+        }
+
+        let _ = event_tx.send(RangesEvent::Status(status(
+            &cache_dir,
+            false,
+            last_error.clone(),
+        )));
+
+        let sleep_for = refresh::time_until_due(
+            last_update(&cache_dir),
+            hosting_config.range_update_interval,
+        );
+        refresh::wait_for_change_or(&mut config_rx, sleep_for).await;
+    }
+}
+
+fn status(cache_dir: &Path, downloading: bool, last_error: Option<String>) -> RangesStatus {
+    let (data_as_of, from_snapshot) = data_as_of(cache_dir);
+    RangesStatus {
+        downloading,
+        data_as_of,
+        from_snapshot,
+        last_error,
+    }
+}
+
+/// Rebuilds the provider database from the (just-refreshed) cache
+/// directory. Runs on a blocking-task thread since `ProviderDb::load`
+/// does blocking file I/O; logs and returns `None` on failure rather than
+/// tearing down the updater loop over e.g. one broken user-defined
+/// signature.
+async fn reload_provider_db(
+    extra_signature_dir: Option<PathBuf>,
+    cache_dir: &Path,
+) -> Option<ProviderDb> {
+    let cache_dir = cache_dir.to_path_buf();
+    let result = tokio::task::spawn_blocking(move || {
+        ProviderDb::load(extra_signature_dir.as_deref(), Some(&cache_dir))
+    })
+    .await;
+
+    match result {
+        Ok(Ok((db, report))) => {
+            for err in &report.errors {
+                tracing::warn!(
+                    provider = %err.provider_id,
+                    url = %err.url,
+                    "range source failed to parse: {}",
+                    err.message
+                );
+            }
+            Some(db)
+        }
+        Ok(Err(err)) => {
+            tracing::warn!(%err, "failed to reload provider signatures after a range update");
+            None
+        }
+        Err(err) => {
+            tracing::warn!(%err, "provider database reload task panicked");
+            None
+        }
+    }
+}
+
+/// One cached range-list file, resolved back to the provider and source
+/// URL it came from, for display in the data-info popup -- not used by
+/// any load/download path.
+#[derive(Debug, Clone)]
+pub struct CachedRangeFile {
+    pub provider_id: String,
+    pub provider_name: String,
+    pub source_url: String,
+    pub file: refresh::CachedFile,
+}
+
+/// Every range-list file actually present in `cache_dir`, resolved back
+/// to the provider/source it came from. Loads signatures (including
+/// `extra_signature_dir`) to do that resolution, so -- like
+/// `ProviderDb::load` -- this does blocking file I/O; call it from a
+/// background task, not the UI event loop. An empty result (rather than
+/// an error) if signatures fail to load, since this is display-only.
+pub fn list_cached_files(
+    extra_signature_dir: Option<&Path>,
+    cache_dir: &Path,
+) -> Vec<CachedRangeFile> {
+    let Ok(loaded) = signatures::load_all(extra_signature_dir) else {
+        return Vec::new();
+    };
+
+    let mut files = Vec::new();
+    for loaded_sig in &loaded {
+        let Some(ranges) = &loaded_sig.ranges else {
+            continue;
+        };
+        for (index, source) in ranges.sources.iter().enumerate() {
+            let filename = source_filename(&loaded_sig.signature.id, index, source.format);
+            let Ok(metadata) = std::fs::metadata(cache_dir.join(&filename)) else {
+                continue;
+            };
+            files.push(CachedRangeFile {
+                provider_id: loaded_sig.signature.id.clone(),
+                provider_name: loaded_sig.signature.name.clone(),
+                source_url: source.url.clone(),
+                file: refresh::CachedFile {
+                    filename,
+                    size_bytes: metadata.len(),
+                    modified: metadata.modified().ok(),
+                },
+            });
+        }
+    }
+    files.sort_by(|a, b| {
+        a.provider_id
+            .cmp(&b.provider_id)
+            .then_with(|| a.file.filename.cmp(&b.file.filename))
+    });
+    files
 }
 
 /// What one fetch attempt found, short of an outright failure: either the
@@ -156,5 +436,90 @@ async fn refresh_one(
             report.refreshed.push(filename.to_string());
         }
         Err(err) => report.failed.push((filename.to_string(), err)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn last_update_is_none_when_the_marker_is_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(last_update(dir.path()).is_none());
+    }
+
+    #[test]
+    fn last_update_reads_the_markers_mtime() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(marker_path(dir.path()), b"").unwrap();
+        assert!(last_update(dir.path()).is_some());
+    }
+
+    #[test]
+    fn data_as_of_falls_back_to_the_bundled_snapshot_when_never_updated() {
+        let dir = tempfile::tempdir().unwrap();
+        let (as_of, from_snapshot) = data_as_of(dir.path());
+        assert!(as_of.is_some());
+        assert!(from_snapshot);
+    }
+
+    #[test]
+    fn data_as_of_prefers_the_caches_own_last_update_once_it_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(marker_path(dir.path()), b"").unwrap();
+        let (as_of, from_snapshot) = data_as_of(dir.path());
+        assert!(as_of.is_some());
+        assert!(!from_snapshot);
+    }
+
+    #[test]
+    fn status_text_reports_snapshot_vs_refreshed_data() {
+        let refreshed = RangesStatus {
+            downloading: false,
+            data_as_of: Some(SystemTime::now() - std::time::Duration::from_secs(3600)),
+            from_snapshot: false,
+            last_error: None,
+        };
+        assert_eq!(refreshed.status_text(), "Ranges: 1h old");
+
+        let snapshot = RangesStatus {
+            from_snapshot: true,
+            ..refreshed.clone()
+        };
+        assert_eq!(snapshot.status_text(), "Ranges: 1h old (bundled snapshot)");
+
+        let never = RangesStatus {
+            downloading: false,
+            data_as_of: None,
+            from_snapshot: false,
+            last_error: None,
+        };
+        assert_eq!(never.status_text(), "Ranges: pending");
+    }
+
+    /// Mirrors `ranges::tests::load_prefers_cache_dir_over_snapshot`: a
+    /// cached `cloudflare-0.txt` should resolve back to Cloudflare's own
+    /// first range source (`ips-v4`) using the real embedded signatures,
+    /// with no network access.
+    #[test]
+    fn list_cached_files_resolves_a_cached_file_back_to_its_provider_and_url() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("cloudflare-0.txt"), "192.0.2.0/24\n").unwrap();
+
+        let files = list_cached_files(None, dir.path());
+        let cloudflare = files
+            .iter()
+            .find(|f| f.provider_id == "cloudflare")
+            .expect("cloudflare-0.txt should resolve to the cloudflare provider");
+        assert_eq!(cloudflare.source_url, "https://www.cloudflare.com/ips-v4");
+        assert_eq!(cloudflare.file.filename, "cloudflare-0.txt");
+        assert_eq!(cloudflare.file.size_bytes, 13);
+    }
+
+    #[test]
+    fn list_cached_files_is_empty_for_an_empty_cache_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(list_cached_files(None, dir.path()).is_empty());
     }
 }

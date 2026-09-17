@@ -128,6 +128,13 @@ fn embedded_file(filename: &str) -> Option<&'static str> {
         .map(|(_, contents)| *contents)
 }
 
+/// When the bundled snapshot (`data/snapshot/`) was generated, from its
+/// embedded `GENERATED_AT` marker. `None` only if the snapshot somehow
+/// wasn't embedded at build time.
+pub fn snapshot_generated_at() -> Option<DateTime<Utc>> {
+    embedded_file("GENERATED_AT").and_then(|s| s.trim().parse().ok())
+}
+
 /// The snapshot/cache filename a provider's Nth range source uses:
 /// `<provider_id>-<index>.<ext>`.
 pub fn source_filename(provider_id: &str, index: usize, format: super::formats::Format) -> String {
@@ -220,11 +227,9 @@ pub fn load(signatures: &[LoadedSignature], cache_dir: Option<&Path>) -> RangeLo
         }
     }
 
-    let snapshot_generated_at = embedded_file("GENERATED_AT").and_then(|s| s.trim().parse().ok());
-
     RangeLoadReport {
         table,
-        snapshot_generated_at,
+        snapshot_generated_at: snapshot_generated_at(),
         used_cache,
         errors,
     }
