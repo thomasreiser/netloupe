@@ -60,7 +60,9 @@ see `Config` in `src/config.rs` for every field and its default).
 | `Ctrl+t` / `Ctrl+w`          | New tab / close tab                                    |
 | `Tab` / `Shift+Tab`          | Next / previous host tab                               |
 | `1`–`9`, `0`, `-` or `←` `→` | Switch pane                                            |
-| `↑`/`↓`, `PgUp`/`PgDn`       | Scroll the current pane's content                      |
+| `↑`/`↓`                      | Move keyboard focus between clickable hostnames/IPs in the pane |
+| `Enter`                      | Open the focused hostname/IP in a new tab              |
+| `PgUp`/`PgDn`                | Scroll the current pane's content                      |
 | `r`                          | Re-run checks for the current pane                     |
 | `R`                          | Re-run all checks for the current host                 |
 | `e`                          | Toggle evidence details (Hosting pane)                 |
@@ -73,6 +75,8 @@ see `Config` in `src/config.rs` for every field and its default).
 | `q`                          | Quit                                                   |
 
 Mouse support is additive: click a host tab or "+ new" to switch/open one, click a pane tab to switch panes, and scroll to scroll the active pane's content. Every popup is click-navigable too — click outside a prompt/picker/the settings editor to cancel it, click `[y]`/`[N]` on a confirm prompt, and click a row in the alt-hostname picker or settings list to select (and open/edit) it.
+
+Every hostname/IP shown anywhere in a pane — a DNS record, a TLS SAN, a traceroute hop, an alt-hostname — is clickable too, opening it in a new tab. `↑`/`↓` move keyboard focus between them instead of scrolling (with `Enter` to open whichever one is focused); `PgUp`/`PgDn` scroll the pane, and the mouse wheel still works everywhere.
 
 ## Development
 

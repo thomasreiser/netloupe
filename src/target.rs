@@ -113,6 +113,31 @@ impl Target {
     pub fn is_ip(&self) -> bool {
         matches!(self, Target::Ip(_))
     }
+
+    /// Like [`Target::parse`], but stricter: rejects a bare single-label
+    /// hostname (e.g. "Cert", "42", a word or number that happens to be
+    /// made of hostname-legal characters). [`Target::parse`] accepts
+    /// those because a single-label name is technically a valid hostname,
+    /// but that permissiveness is wrong for a use `parse` was never
+    /// designed for -- scanning arbitrary rendered pane text (`ui::linkscan`)
+    /// for things worth making clickable, where almost every such bare
+    /// word is *not* meant to be a host.
+    pub fn parse_strict(input: &str) -> Result<Self, TargetParseError> {
+        let target = Self::parse(input)?;
+        if let Target::Host { ascii, .. } = &target {
+            let trimmed = ascii.trim_end_matches('.');
+            let labels: Vec<&str> = trimmed.split('.').collect();
+            // Real TLDs are always at least 2 letters (ICANN requires
+            // it) -- without this, ordinary two-initial abbreviations
+            // like "D.C." or "U.S." parse as a syntactically valid
+            // two-label hostname and would otherwise get flagged too.
+            let last_label_looks_like_a_tld = labels.last().is_some_and(|l| l.len() >= 2);
+            if labels.len() < 2 || !last_label_looks_like_a_tld {
+                return Err(TargetParseError::Invalid(input.to_string()));
+            }
+        }
+        Ok(target)
+    }
 }
 
 impl fmt::Display for Target {
@@ -255,5 +280,34 @@ mod tests {
     fn strips_userinfo_from_url() {
         let t = Target::parse("https://user:pass@example.com/").unwrap();
         assert_eq!(t.display(), "example.com");
+    }
+
+    #[test]
+    fn parse_strict_rejects_a_bare_single_label_word_or_number() {
+        // Both are valid single-label hostnames per `Target::parse` (DNS
+        // allows it), but neither is something a rendered pane's plain
+        // text should turn into a clickable host.
+        assert!(Target::parse("Cert").is_ok());
+        assert!(Target::parse_strict("Cert").is_err());
+        assert!(Target::parse("42").is_ok());
+        assert!(Target::parse_strict("42").is_err());
+    }
+
+    #[test]
+    fn parse_strict_rejects_two_initial_abbreviations() {
+        // "D.C." (as in "Washington, D.C.") is a syntactically valid
+        // two-label hostname -- both labels pass the same character
+        // rules a real hostname's would -- but a single-letter last
+        // label is never a real TLD.
+        assert!(Target::parse_strict("D.C.").is_err());
+        assert!(Target::parse_strict("U.S.").is_err());
+    }
+
+    #[test]
+    fn parse_strict_accepts_multi_label_hostnames_and_any_ip() {
+        assert!(Target::parse_strict("example.com").is_ok());
+        assert!(Target::parse_strict("a.iana-servers.net.").is_ok());
+        assert!(Target::parse_strict("8.8.8.8").is_ok());
+        assert!(Target::parse_strict("2606:4700:4700::1111").is_ok());
     }
 }

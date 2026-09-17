@@ -139,6 +139,13 @@ pub struct TabState {
     /// changes, since a stale scroll position from a different pane's
     /// (differently shaped) content would be meaningless.
     pub scroll: u16,
+    /// Which of `AppState::clickable_spans` (the hostnames/IPs found in
+    /// the last rendered frame -- see `ui::linkscan`) has keyboard focus,
+    /// moved by `Action::FocusNextLink`/`FocusPrevLink` (Down/Up) and
+    /// opened by `Action::ActivateFocusedLink` (Enter). Reset alongside
+    /// `scroll` for the same reason: a focus index from a different
+    /// pane's (differently shaped) link list would be meaningless.
+    pub focused_link: Option<usize>,
     /// The DNS server every check for this tab resolves names against,
     /// chosen once via `Mode::ChooseResolver` when the tab was opened.
     /// `None` = the system's normally-configured resolver.
@@ -231,6 +238,17 @@ pub struct AppState {
     /// much of its current sleep is left. `None` in tests, which don't
     /// run the background task at all.
     geoip_config_tx: Option<tokio::sync::watch::Sender<Arc<Config>>>,
+    /// The hostnames/IPs found in the last rendered frame (see
+    /// `ui::linkscan`), across the whole terminal in absolute
+    /// coordinates. Updated by `run`'s event loop right after each draw
+    /// (rule 1: rendering itself never mutates state) -- one frame
+    /// behind what's about to be drawn, same as `last_area` below, which
+    /// in practice self-corrects immediately since content rarely
+    /// changes between one frame and the next. `ui::draw` reads this to
+    /// underline every clickable span and highlight whichever one has
+    /// keyboard focus; `app::decode_mouse` reads it to hit-test clicks
+    /// on pane content.
+    pub clickable_spans: Vec<crate::ui::linkscan::ClickableSpan>,
     next_tab_id: AtomicU64,
 }
 
@@ -248,6 +266,7 @@ impl AppState {
             config_path: Config::default_path().ok(),
             geoip: crate::geoip::GeoipStatus::default(),
             geoip_config_tx: None,
+            clickable_spans: Vec::new(),
             next_tab_id: AtomicU64::new(1),
         }
     }
@@ -314,6 +333,7 @@ impl AppState {
             ports_confirmed: None,
             zone_walk_confirmed: None,
             scroll: 0,
+            focused_link: None,
             resolver,
             ping_paused: ping_paused.clone(),
         };
@@ -807,6 +827,7 @@ impl AppState {
                     if i < Pane::ALL.len() {
                         tab.active_pane = i;
                         tab.scroll = 0;
+                        tab.focused_link = None;
                         self.maybe_prompt_ports();
                     }
                 }
@@ -815,6 +836,7 @@ impl AppState {
                 if let Some(tab) = self.tabs.get_mut(self.active_tab) {
                     tab.active_pane = (tab.active_pane + 1) % Pane::ALL.len();
                     tab.scroll = 0;
+                    tab.focused_link = None;
                 }
                 self.maybe_prompt_ports();
             }
@@ -822,6 +844,7 @@ impl AppState {
                 if let Some(tab) = self.tabs.get_mut(self.active_tab) {
                     tab.active_pane = (tab.active_pane + Pane::ALL.len() - 1) % Pane::ALL.len();
                     tab.scroll = 0;
+                    tab.focused_link = None;
                 }
                 self.maybe_prompt_ports();
             }
@@ -829,6 +852,39 @@ impl AppState {
             Action::ScrollDown => self.scroll_by(1),
             Action::ScrollPageUp => self.scroll_by(-10),
             Action::ScrollPageDown => self.scroll_by(10),
+            Action::FocusNextLink => {
+                let len = self.clickable_spans.len();
+                if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+                    if len > 0 {
+                        tab.focused_link = Some(match tab.focused_link {
+                            None => 0,
+                            Some(i) if i + 1 < len => i + 1,
+                            Some(i) => i,
+                        });
+                    }
+                }
+            }
+            Action::FocusPrevLink => {
+                let len = self.clickable_spans.len();
+                if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+                    if len > 0 {
+                        tab.focused_link = Some(match tab.focused_link {
+                            None => len - 1,
+                            Some(i) if i > 0 => i - 1,
+                            Some(i) => i,
+                        });
+                    }
+                }
+            }
+            Action::ActivateFocusedLink => {
+                if let Some(target) = self.active().and_then(|tab| {
+                    let i = tab.focused_link?;
+                    self.clickable_spans.get(i).map(|s| s.target.clone())
+                }) {
+                    self.open_link(target, sender);
+                }
+            }
+            Action::OpenLink(target) => self.open_link(target, sender),
             Action::RerunPane => {
                 if self.current_pane() == Some(Pane::Ports) {
                     self.maybe_prompt_ports();
@@ -860,6 +916,13 @@ impl AppState {
             Action::CopyPane => {} // clipboard support is a later addition; no-op for now.
             _ => {}
         }
+    }
+
+    /// Opens a new tab for a hostname/IP clicked (or Enter-activated)
+    /// from the active pane's content -- see `Action::OpenLink`.
+    fn open_link(&mut self, target: Target, sender: &mpsc::Sender<CheckEvent>) {
+        let resolver = self.active().and_then(|t| t.resolver);
+        self.open_tab(target, resolver, sender);
     }
 
     /// Opens the alternative-hostname picker for the active tab, if it has
@@ -902,6 +965,7 @@ impl AppState {
     fn reset_scroll(&mut self) {
         if let Some(tab) = self.tabs.get_mut(self.active_tab) {
             tab.scroll = 0;
+            tab.focused_link = None;
         }
     }
 
@@ -1023,8 +1087,12 @@ fn decode_normal_key(key: crossterm::event::KeyEvent) -> Action {
         KeyCode::BackTab => Action::PrevTab,
         KeyCode::Left => Action::PrevPane,
         KeyCode::Right => Action::NextPane,
-        KeyCode::Up => Action::ScrollUp,
-        KeyCode::Down => Action::ScrollDown,
+        // Up/Down move between clickable hostnames/IPs rather than
+        // scrolling -- see `Action::FocusNextLink`'s doc comment.
+        // PgUp/PgDn are the keyboard's scroll keys.
+        KeyCode::Up => Action::FocusPrevLink,
+        KeyCode::Down => Action::FocusNextLink,
+        KeyCode::Enter => Action::ActivateFocusedLink,
         KeyCode::PageUp => Action::ScrollPageUp,
         KeyCode::PageDown => Action::ScrollPageDown,
         KeyCode::Char('1') => Action::SelectPane(0),
@@ -1108,6 +1176,12 @@ fn decode_mouse(
                     Some(i) => Action::SelectPane(i),
                     None => Action::None,
                 }
+            } else if let Some(span) = state
+                .clickable_spans
+                .iter()
+                .find(|s| s.contains(mouse.row, mouse.column))
+            {
+                Action::OpenLink(span.target.clone())
             } else {
                 Action::None
             }
@@ -1171,10 +1245,17 @@ pub async fn run(
     let mut last_area = ratatui::layout::Rect::default();
 
     loop {
-        terminal.draw(|frame| {
+        let completed = terminal.draw(|frame| {
             last_area = frame.area();
             crate::ui::draw(frame, &state);
         })?;
+        // See `AppState::clickable_spans`'s doc comment: this is what the
+        // frame just drawn actually shows, scanned once per iteration so
+        // both mouse clicks and keyboard link-navigation stay in sync
+        // with what's on screen right now (a one-iteration lag behind
+        // whatever content change, if any, an event is about to cause).
+        state.clickable_spans =
+            crate::ui::linkscan::scan(completed.buffer, crate::ui::body_area(last_area));
 
         tokio::select! {
             Some(term_event) = term_rx.recv() => {
@@ -1818,5 +1899,106 @@ mod tests {
             editing.is_some(),
             "the click should open the field for editing"
         );
+    }
+
+    fn fake_span(row: u16, col_start: u16, text: &str) -> crate::ui::linkscan::ClickableSpan {
+        crate::ui::linkscan::ClickableSpan {
+            row,
+            col_start,
+            col_end: col_start + text.len() as u16,
+            text: text.to_string(),
+            target: Target::parse(text).unwrap(),
+        }
+    }
+
+    /// Focus starts at one end, moves one at a time, and clamps rather
+    /// than wrapping -- matching how `SelectUp`/`SelectDown` already
+    /// behave in this app's other list pickers (Settings, SelectAltName).
+    #[tokio::test]
+    async fn focus_next_and_prev_link_cycle_without_wrapping() {
+        let mut state = AppState::new(Config::default(), ProviderDb::default());
+        let tx = test_sender();
+        state.open_tab(local_target(), None, &tx);
+        state.clickable_spans = vec![
+            fake_span(0, 0, "a.com"),
+            fake_span(1, 0, "b.com"),
+            fake_span(2, 0, "c.com"),
+        ];
+
+        state.handle_action(Action::FocusNextLink, &tx);
+        assert_eq!(state.tabs[0].focused_link, Some(0));
+        state.handle_action(Action::FocusNextLink, &tx);
+        state.handle_action(Action::FocusNextLink, &tx);
+        assert_eq!(state.tabs[0].focused_link, Some(2));
+        state.handle_action(Action::FocusNextLink, &tx);
+        assert_eq!(state.tabs[0].focused_link, Some(2), "clamped at the end");
+
+        state.tabs[0].focused_link = None;
+        state.handle_action(Action::FocusPrevLink, &tx);
+        assert_eq!(
+            state.tabs[0].focused_link,
+            Some(2),
+            "Up starts from the end"
+        );
+        state.handle_action(Action::FocusPrevLink, &tx);
+        state.handle_action(Action::FocusPrevLink, &tx);
+        assert_eq!(state.tabs[0].focused_link, Some(0));
+        state.handle_action(Action::FocusPrevLink, &tx);
+        assert_eq!(state.tabs[0].focused_link, Some(0), "clamped at the start");
+    }
+
+    /// End-to-end: Enter opens whichever link currently has focus.
+    #[tokio::test]
+    async fn activate_focused_link_opens_a_new_tab() {
+        let mut state = AppState::new(Config::default(), ProviderDb::default());
+        let tx = test_sender();
+        state.open_tab(local_target(), None, &tx);
+        state.clickable_spans = vec![fake_span(0, 0, "9.9.9.9")];
+        state.handle_action(Action::FocusNextLink, &tx);
+        assert_eq!(state.tabs[0].focused_link, Some(0));
+
+        state.handle_action(Action::ActivateFocusedLink, &tx);
+
+        assert_eq!(state.tabs.len(), 2, "should have opened a new tab");
+        assert_eq!(state.tabs[1].target, Target::parse("9.9.9.9").unwrap());
+    }
+
+    /// End-to-end: clicking a hostname/IP found in the active pane's
+    /// content (see `ui::linkscan`) opens it, through the same
+    /// `decode_mouse` + `handle_action` path the real event loop uses.
+    #[tokio::test]
+    async fn clicking_a_pane_content_link_opens_it() {
+        let mut state = AppState::new(Config::default(), ProviderDb::default());
+        let tx = test_sender();
+        state.open_tab(local_target(), None, &tx);
+        state.clickable_spans = vec![fake_span(10, 20, "example.com")];
+
+        let terminal_area = ratatui::layout::Rect::new(0, 0, 100, 40);
+        let action = decode_mouse(&state.mode, terminal_area, &state, left_click(10, 22));
+        assert_eq!(
+            action,
+            Action::OpenLink(Target::parse("example.com").unwrap())
+        );
+        state.handle_action(action, &tx);
+
+        assert_eq!(state.tabs.len(), 2);
+        assert_eq!(state.tabs[1].target, Target::parse("example.com").unwrap());
+    }
+
+    /// Switching panes must reset link focus, the same as it already
+    /// resets scroll -- a stale focus index from a differently-shaped
+    /// pane's link list would be meaningless (and could even point past
+    /// the new pane's list entirely).
+    #[tokio::test]
+    async fn switching_panes_resets_focused_link() {
+        let mut state = AppState::new(Config::default(), ProviderDb::default());
+        let tx = test_sender();
+        state.open_tab(local_target(), None, &tx);
+        state.clickable_spans = vec![fake_span(0, 0, "a.com")];
+        state.handle_action(Action::FocusNextLink, &tx);
+        assert_eq!(state.tabs[0].focused_link, Some(0));
+
+        state.handle_action(Action::NextPane, &tx);
+        assert_eq!(state.tabs[0].focused_link, None);
     }
 }

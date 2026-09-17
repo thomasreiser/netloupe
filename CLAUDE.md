@@ -197,6 +197,7 @@ src/
   ui/                  # Rendering only; no I/O, no business logic
     mod.rs
     tabs.rs
+    linkscan.rs        # Finds hostnames/IPs in rendered pane output, makes them clickable
     panes/             # one file per pane (overview.rs, dns.rs, hosting.rs, ...)
     widgets/           # reusable widgets (sparkline, kv_table, status_badge, evidence_list, worldmap)
   checks/              # One module per check; no ratatui imports here
@@ -317,7 +318,9 @@ Config lives at `$XDG_CONFIG_HOME/netloupe/config.toml`. Every option has a sens
 | `Ctrl+t` / `Ctrl+w` | New tab / close tab |
 | `Tab` / `Shift+Tab` | Next / previous host tab |
 | `1`–`9`, `0`, `-` or `←` `→` | Switch pane |
-| `↑`/`↓`, `PgUp`/`PgDn` | Scroll the current pane's content |
+| `↑`/`↓` | Move keyboard focus between clickable hostnames/IPs in the pane |
+| `Enter` | Open the focused hostname/IP in a new tab |
+| `PgUp`/`PgDn` | Scroll the current pane's content |
 | `r` | Re-run checks for the current pane |
 | `R` | Re-run all checks for the current host |
 | `e` | Toggle evidence details (Hosting pane) |
@@ -332,6 +335,12 @@ Config lives at `$XDG_CONFIG_HOME/netloupe/config.toml`. Every option has a sens
 Mouse support is additive, not a replacement for the keyboard, and every popup is click-navigable too:
 - **Normal mode**: click a host tab or the "+ new" label to switch/open one, click a pane tab to switch panes, scroll the wheel anywhere to scroll the active pane's content. Decoded in `app.rs`'s `decode_mouse`, using `ui::tabs::host_tab_at`/`pane_tab_at`/`new_tab_label_at` for hit-testing against the exact widths `ui::tabs` renders, so the two can never drift apart.
 - **Every modal popup** goes through `ui::decode_popup_mouse` first (same drift-proof approach: hit-testing functions sit beside each popup's `render_*` and reuse its exact geometry/label-building). A click outside a popup cancels it (`Mode::NewHostPrompt`, `ChooseResolver`, `SelectAltName`, `Settings`); the Help overlay closes on any click, having nothing else to click; the two y/n confirm prompts (`ConfirmPorts`/`ConfirmZoneWalk`) get a clickable `[y]`/`[N]`, with any other click falling through to normal tab/pane navigation exactly like a non-y/n/Esc key already does. `SelectAltName` and `Settings` support clicking a list row directly (selecting and, respectively, opening/editing it) and scrolling to move the selection; a click elsewhere in `Settings` while a field is actively being edited is ignored rather than risking the in-progress input.
+
+### Clickable hostnames/IPs in pane content
+Every hostname/IP anywhere in the active pane's rendered content -- a DNS record, a TLS SAN, a traceroute hop, an alt-hostname, ... -- is clickable, opening it in a new tab (reusing the current tab's resolver, the same "quick cross-reference" reasoning as `Mode::SelectAltName`'s click/Enter).
+- `ui::linkscan::scan` finds these by scanning the *already-rendered* [`Buffer`] for hostname/IP-shaped text after each frame, rather than teaching every individual pane to track "this value I'm drawing is a hostname" -- a change that would otherwise repeat across all ~11 differently-shaped panes. Since it works on the final composed screen, a clickable region can never drift from what's actually drawn. Candidates are found with a broad regex, then validated through `Target::parse_strict` (a stricter sibling of `Target::parse`: it also rejects a bare single-label word/number like "Cert" or "42" -- syntactically a valid single-label hostname, but not something plain pane text should treat as a link -- and a two-label match whose last label isn't at least 2 characters, like the "D.C." in "Washington, D.C.", since no real TLD is a single letter).
+- `app::run`'s event loop rescans after every draw and stores the result in `AppState.clickable_spans` (rule 1: rendering itself never mutates state) -- one frame behind what's about to be drawn, which self-corrects immediately since pane content rarely changes between one frame and the next. `app::decode_mouse` hit-tests clicks against it; `ui::draw` reads it to underline every clickable span and highlight whichever one has keyboard focus.
+- `Up`/`Down` move keyboard focus among the current pane's clickable spans (clamped at the ends, not wrapping, matching `SelectUp`/`SelectDown` elsewhere in this app) instead of scrolling -- with every host/IP clickable, moving between them is far more often what's wanted from the keyboard than nudging the scroll position by one line. `Enter` opens whichever one has focus. `PgUp`/`PgDn` remain the keyboard's scroll keys; the mouse wheel still scrolls too. Focus resets whenever the active pane or tab changes.
 
 ## Roadmap
 
