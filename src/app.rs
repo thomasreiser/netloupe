@@ -2026,15 +2026,12 @@ mod tests {
         assert_eq!(state.tabs[0].focused_link, None);
     }
 
-    /// Regression test: a bug report showed leftover link text from the
-    /// previous pane rendered garbled on top of the new pane's content
-    /// right after switching. Root cause: `clickable_spans` reflects the
-    /// *previous* draw (see its doc comment), so the very next frame
-    /// after a switch renders using spans positioned for content that's
-    /// no longer there -- unless the switch itself clears them first, so
-    /// that frame simply has no link styling yet instead of wrong
-    /// styling in the wrong place. Covers every action that changes what
-    /// the active pane shows.
+    /// `clickable_spans` reflects the *previous* draw (see its doc
+    /// comment), so switching what the active pane shows must clear it:
+    /// otherwise the very next frame renders using spans positioned for
+    /// content that's no longer there, overlaying leftover link text on
+    /// top of the new pane's differently-laid-out content. Covers every
+    /// action that changes what the active pane shows.
     #[tokio::test]
     async fn switching_pane_or_tab_clears_stale_clickable_spans() {
         let tx = test_sender();

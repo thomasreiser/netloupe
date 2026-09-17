@@ -269,6 +269,8 @@ Before finishing any task, run `cargo fmt`, `cargo clippy` (with no warnings), a
 - Keep parsing logic (SPF flattening, DMARC parsing, IP classification, range-list formats) in plain synchronous functions so it can be unit-tested without the network.
 - Provider knowledge (ranges, ASNs, patterns, headers) is **data** in `data/providers/`, never hardcoded in Rust.
 - Public items get doc comments. Comments explain *why*, not *what*.
+- Comments and docs describe the code's **current** behavior only -- never a changelog. Don't write "now does X" (implying it didn't before), "used to be Y", "previously", "was added because", "a bug report showed...", "this fixes...", or reference a prior version, a past bug, or the change that produced the current state. A reader who's never seen the old code should be able to read a comment and learn only what's true today; git history (`git log`, commit messages, blame) is where the story of *how it got that way* belongs, not the code itself. This applies to `CLAUDE.md`/`README.md` too.
+- Keep `CLAUDE.md`, `README.md`, and code comments in sync with the code *as part of* every change that affects them, not as a follow-up: a behavior change, a new module, a changed keybinding, or a renamed concept means updating whatever documents it in the same change.
 - Commits follow Conventional Commits (`feat:`, `fix:`, `refactor:`, `data:` for signature updates, ...).
 
 ## Testing

@@ -6,11 +6,11 @@ What the Geo pane's map (`src/worldmap.rs`) embeds directly via
 
 - `coastline_0.1deg.bin`, `borders_0.1deg.bin`: a 3600x1800 (one tenth of
   a degree per cell) world grid, packed one bit per cell, marking where a
-  coastline or a country-border outline crosses that cell. Rasterized
-  from Natural Earth's line/polygon vector data -- see `xtask/src/geo.rs`
-  for exactly how. Coarser than this (a 1-degree grid was the original
-  choice) made borders in a densely-partitioned region like central
-  Europe merge into a solid wash once rasterized.
+  coastline or a country-border outline crosses that cell -- fine enough
+  that borders in a densely-partitioned region like central Europe
+  rasterize as separate lines rather than merging into a solid wash.
+  Rasterized from Natural Earth's line/polygon vector data -- see
+  `xtask/src/geo.rs` for exactly how.
 - `cities.csv`: `name,lat,lon,population` for every place in Natural
   Earth's populated-places layer with a usable coordinate, sorted by
   population descending.
