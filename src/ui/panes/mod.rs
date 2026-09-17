@@ -77,6 +77,7 @@ pub(super) fn header_and_body(
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(1), Constraint::Min(0)])
+        .spacing(1)
         .split(inner);
     render_status_header(frame, chunks[0], tab, checks);
     chunks[1]

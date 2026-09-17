@@ -24,6 +24,7 @@ pub fn render(frame: &mut Frame, area: Rect, tab: &TabState) {
             Constraint::Length(6),
             Constraint::Min(0),
         ])
+        .spacing(1)
         .split(body);
 
     render_ping_summary(frame, chunks[0], tab);
@@ -166,6 +167,7 @@ fn render_trace(frame: &mut Frame, area: Rect, tab: &TabState) {
             Constraint::Length(reason_height),
             Constraint::Min(0),
         ])
+        .spacing(1)
         .split(area);
 
     render_trace_summary(frame, chunks[0], trace);

@@ -31,18 +31,22 @@ pub fn render(frame: &mut Frame, area: Rect, tab: &TabState, show_country_flags:
     let sections = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Percentage(62), Constraint::Min(5)])
+        .spacing(1)
         .split(body);
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .spacing(1)
         .split(sections[0]);
     let top = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Ratio(1, 3); 3])
+        .spacing(1)
         .split(rows[0]);
     let bottom = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Ratio(1, 3); 3])
+        .spacing(1)
         .split(rows[1]);
 
     render_alt_names(frame, sections[1], tab);
