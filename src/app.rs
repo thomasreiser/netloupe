@@ -986,7 +986,16 @@ impl AppState {
     fn scroll_by(&mut self, delta: i32) {
         if let Some(tab) = self.tabs.get_mut(self.active_tab) {
             tab.scroll = (i32::from(tab.scroll) + delta).max(0) as u16;
+            tab.focused_link = None;
         }
+        // Scrolling changes which portion of the pane's content is on
+        // screen, so last frame's clickable-span positions and text no
+        // longer match what's about to be drawn -- see `reset_scroll`'s
+        // doc comment for why leaving them in place would overlay stale
+        // link styling on top of the freshly-scrolled content for a
+        // frame instead of just rendering plainly until the rescan
+        // catches up.
+        self.clickable_spans.clear();
     }
 
     /// Switching to the Ports pane for the first time this tab asks for
@@ -2082,5 +2091,30 @@ mod tests {
         state.clickable_spans = vec![fake_span(0, 0, "a.com")];
         state.handle_action(Action::CloseTab, &tx);
         assert!(state.clickable_spans.is_empty(), "CloseTab");
+    }
+
+    /// Scrolling changes which lines of the active pane are on screen,
+    /// same as switching panes does -- so it must clear stale
+    /// `clickable_spans` too, or the link overlay stays pasted at its
+    /// pre-scroll positions on top of the freshly-scrolled content (see
+    /// `scroll_by`'s doc comment).
+    #[tokio::test]
+    async fn scrolling_clears_stale_clickable_spans() {
+        let tx = test_sender();
+        let mut state = AppState::new(Config::default(), ProviderDb::default());
+        state.open_tab(local_target(), None, &tx);
+
+        for action in [
+            Action::ScrollUp,
+            Action::ScrollDown,
+            Action::ScrollPageUp,
+            Action::ScrollPageDown,
+        ] {
+            state.clickable_spans = vec![fake_span(0, 0, "a.com")];
+            state.tabs[0].focused_link = Some(0);
+            state.handle_action(action.clone(), &tx);
+            assert!(state.clickable_spans.is_empty(), "{action:?}");
+            assert_eq!(state.tabs[0].focused_link, None, "{action:?}");
+        }
     }
 }
