@@ -329,7 +329,9 @@ Config lives at `$XDG_CONFIG_HOME/netloupe/config.toml`. Every option has a sens
 | `?` | Help overlay |
 | `q` | Quit |
 
-Mouse support is additive, not a replacement for the keyboard: click a host tab or the "+ new" label to switch/open one, click a pane tab to switch panes, and scroll the wheel anywhere to scroll the active pane's content. Only live in `Mode::Normal` and the two y/n confirm prompts (a click during any other modal popup, e.g. the settings editor or a text prompt, does nothing, matching how most keys are handled then). Decoded in `app.rs`'s `decode_mouse`, using `ui::tabs::host_tab_at`/`pane_tab_at`/`new_tab_label_at` for hit-testing against the exact widths `ui::tabs` renders, so the two can never drift apart.
+Mouse support is additive, not a replacement for the keyboard, and every popup is click-navigable too:
+- **Normal mode**: click a host tab or the "+ new" label to switch/open one, click a pane tab to switch panes, scroll the wheel anywhere to scroll the active pane's content. Decoded in `app.rs`'s `decode_mouse`, using `ui::tabs::host_tab_at`/`pane_tab_at`/`new_tab_label_at` for hit-testing against the exact widths `ui::tabs` renders, so the two can never drift apart.
+- **Every modal popup** goes through `ui::decode_popup_mouse` first (same drift-proof approach: hit-testing functions sit beside each popup's `render_*` and reuse its exact geometry/label-building). A click outside a popup cancels it (`Mode::NewHostPrompt`, `ChooseResolver`, `SelectAltName`, `Settings`); the Help overlay closes on any click, having nothing else to click; the two y/n confirm prompts (`ConfirmPorts`/`ConfirmZoneWalk`) get a clickable `[y]`/`[N]`, with any other click falling through to normal tab/pane navigation exactly like a non-y/n/Esc key already does. `SelectAltName` and `Settings` support clicking a list row directly (selecting and, respectively, opening/editing it) and scrolling to move the selection; a click elsewhere in `Settings` while a field is actively being edited is ignored rather than risking the in-progress input.
 
 ## Roadmap
 

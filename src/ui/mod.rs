@@ -213,8 +213,33 @@ fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
         .split(vertical[1])[1]
 }
 
+// One function per popup's geometry, each called from exactly two
+// places -- its `render_*` function and its mouse hit-testing in
+// `decode_popup_mouse` below -- so the two can never drift apart.
+fn new_host_prompt_popup(area: Rect) -> Rect {
+    centered_rect(60, 15, area)
+}
+fn choose_resolver_popup(area: Rect) -> Rect {
+    centered_rect(64, 20, area)
+}
+pub(crate) fn settings_popup(area: Rect) -> Rect {
+    centered_rect(76, 80, area)
+}
+pub(crate) fn confirm_ports_popup(area: Rect) -> Rect {
+    centered_rect(62, 30, area)
+}
+fn confirm_zone_walk_popup(area: Rect) -> Rect {
+    centered_rect(62, 32, area)
+}
+fn select_alt_name_popup(area: Rect) -> Rect {
+    centered_rect(64, 60, area)
+}
+fn help_popup(area: Rect) -> Rect {
+    centered_rect(56, 75, area)
+}
+
 fn render_prompt(frame: &mut Frame, area: Rect, buf: &str) {
-    let popup = centered_rect(60, 15, area);
+    let popup = new_host_prompt_popup(area);
     frame.render_widget(Clear, popup);
     let block = theme::panel_with_hint(
         "New host",
@@ -238,7 +263,7 @@ fn render_choose_resolver(
     target: &crate::target::Target,
     input: &str,
 ) {
-    let popup = centered_rect(64, 20, area);
+    let popup = choose_resolver_popup(area);
     frame.render_widget(Clear, popup);
     let block = theme::panel_with_hint(
         "DNS server",
@@ -291,12 +316,12 @@ fn render_settings(
     editing: Option<&str>,
     message: Option<&str>,
 ) {
-    let popup = centered_rect(76, 80, area);
+    let popup = settings_popup(area);
     frame.render_widget(Clear, popup);
     let hint = if editing.is_some() {
         "enter confirm · esc cancel edit"
     } else {
-        "↑/↓ select · enter edit · esc close"
+        "↑/↓/click select · enter edit · esc close"
     };
     let block = theme::panel_with_hint("Settings", hint, theme::MUTED, theme::CYAN);
     let inner = block.inner(popup);
@@ -378,12 +403,74 @@ fn render_settings(
     }
 }
 
+/// The exact question text shown (and clicked) for each yes/no prompt --
+/// shared between the renderer and `yes_no_hit` so the two can't drift.
+pub(crate) const PORTS_QUESTION: &str = "Run the configured port scan against this host?  ";
+const ZONE_WALK_QUESTION: &str = "Walk the zone now?  ";
+
+/// The "question  [y] / [N]" spans for a yes/no prompt, used both to
+/// render the line and (via `yes_no_hit`) to hit-test clicks on it.
+pub(crate) fn yes_no_spans(question: &'static str) -> Vec<Span<'static>> {
+    vec![
+        Span::styled(question, Style::default().fg(theme::TEXT)),
+        Span::styled(
+            "[y]",
+            Style::default()
+                .fg(theme::GREEN)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" / "),
+        Span::styled(
+            "[N]",
+            Style::default().fg(theme::RED).add_modifier(Modifier::BOLD),
+        ),
+    ]
+}
+
+/// Which button (`Some(true)` = yes, `Some(false)` = no) `col` (relative
+/// to the yes/no line's own left edge) landed on, if any.
+fn yes_no_hit(question: &'static str, col: u16) -> Option<bool> {
+    let mut x = 0u16;
+    for (i, span) in yes_no_spans(question).iter().enumerate() {
+        let width = span.width() as u16;
+        if (x..x + width).contains(&col) {
+            return match i {
+                1 => Some(true),
+                3 => Some(false),
+                _ => None,
+            };
+        }
+        x += width;
+    }
+    None
+}
+
+/// The screen row the yes/no line renders on: the last row of a confirm
+/// popup's bordered inner area (see `render_confirm_ports`/
+/// `render_confirm_zone_walk`'s `Layout` -- the button line is always
+/// the fixed-height final chunk, regardless of how the description text
+/// above it wraps), and the column offset (the inner area's own left
+/// edge) a click's absolute column needs to subtract before calling
+/// `yes_no_hit`.
+pub(crate) fn confirm_button_row_and_col_offset(popup: Rect) -> (u16, u16) {
+    let inner_y = popup.y + 1;
+    let inner_height = popup.height.saturating_sub(2);
+    let row = inner_y + inner_height.saturating_sub(1);
+    let col_offset = popup.x + 1;
+    (row, col_offset)
+}
+
 fn render_confirm_ports(frame: &mut Frame, area: Rect) {
-    let popup = centered_rect(62, 30, area);
+    let popup = confirm_ports_popup(area);
     frame.render_widget(Clear, popup);
     let block = theme::panel("⚠ Port scan", theme::ORANGE);
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(0), Constraint::Length(1)])
+        .split(inner);
     let text = Paragraph::new(vec![
         Line::from(Span::styled(
             "Scanning a host's ports without authorization may be illegal",
@@ -397,35 +484,23 @@ fn render_confirm_ports(frame: &mut Frame, area: Rect) {
             "Only scan hosts you own or are authorized to test.",
             Style::default().fg(theme::MUTED),
         )),
-        Line::from(""),
-        Line::from(vec![
-            Span::styled(
-                "Run the configured port scan against this host?  ",
-                Style::default().fg(theme::TEXT),
-            ),
-            Span::styled(
-                "[y]",
-                Style::default()
-                    .fg(theme::GREEN)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(" / "),
-            Span::styled(
-                "[N]",
-                Style::default().fg(theme::RED).add_modifier(Modifier::BOLD),
-            ),
-        ]),
     ])
     .wrap(Wrap { trim: true });
-    frame.render_widget(text, inner);
+    frame.render_widget(text, chunks[0]);
+    frame.render_widget(Line::from(yes_no_spans(PORTS_QUESTION)), chunks[1]);
 }
 
 fn render_confirm_zone_walk(frame: &mut Frame, area: Rect, state: &AppState) {
-    let popup = centered_rect(62, 32, area);
+    let popup = confirm_zone_walk_popup(area);
     frame.render_widget(Clear, popup);
     let block = theme::panel("⚠ NSEC zone walk", theme::ORANGE);
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(0), Constraint::Length(1)])
+        .split(inner);
 
     let target = state
         .active()
@@ -448,24 +523,10 @@ fn render_confirm_zone_walk(frame: &mut Frame, area: Rect, state: &AppState) {
             "only do this against zones you're authorized to probe.",
             Style::default().fg(theme::MUTED),
         )),
-        Line::from(""),
-        Line::from(vec![
-            Span::styled("Walk the zone now?  ", Style::default().fg(theme::TEXT)),
-            Span::styled(
-                "[y]",
-                Style::default()
-                    .fg(theme::GREEN)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(" / "),
-            Span::styled(
-                "[N]",
-                Style::default().fg(theme::RED).add_modifier(Modifier::BOLD),
-            ),
-        ]),
     ])
     .wrap(Wrap { trim: true });
-    frame.render_widget(text, inner);
+    frame.render_widget(text, chunks[0]);
+    frame.render_widget(Line::from(yes_no_spans(ZONE_WALK_QUESTION)), chunks[1]);
 }
 
 fn render_select_alt_name(
@@ -474,11 +535,11 @@ fn render_select_alt_name(
     names: &[crate::checks::altnames::AltName],
     selected: usize,
 ) {
-    let popup = centered_rect(64, 60, area);
+    let popup = select_alt_name_popup(area);
     frame.render_widget(Clear, popup);
     let block = theme::panel_with_hint(
         "Open alternative host",
-        "↑/↓ select · enter open · esc cancel",
+        "↑/↓ select · enter/click open · esc cancel",
         theme::MUTED,
         theme::pane_accent(crate::app::Pane::Overview),
     );
@@ -517,9 +578,9 @@ fn render_help(frame: &mut Frame, area: Rect) {
     // 24-row terminal (60% of 24 rows, minus the popup's own border,
     // clipped the last couple of rows even before the mouse-support row
     // was added).
-    let popup = centered_rect(56, 75, area);
+    let popup = help_popup(area);
     frame.render_widget(Clear, popup);
-    let block = theme::panel_with_hint("Help", "? / esc to close", theme::MUTED, theme::PURPLE);
+    let block = theme::panel_with_hint("Help", "?/esc/click to close", theme::MUTED, theme::PURPLE);
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
 
@@ -557,6 +618,201 @@ fn render_help(frame: &mut Frame, area: Rect) {
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
+/// Decodes a mouse event against whichever modal popup `mode` is
+/// currently showing. `None` means "not this function's concern" --
+/// `app::decode_mouse` falls back to its own Normal-mode tab-bar/scroll
+/// logic, which is the right behavior for `Mode::Normal` (no popup at
+/// all) and, for the two confirm prompts, mirrors `decode_key`'s
+/// identical fallthrough: a click that isn't on the popup's Yes/No
+/// buttons should still work as normal navigation, dismissing the
+/// prompt without recording a decision (handled by `app.rs`'s existing
+/// `(Mode::ConfirmPorts | Mode::ConfirmZoneWalk, action)` arm). Every
+/// other mode here is truly modal and always returns `Some(_)`, even to
+/// say "consumed, does nothing" -- their content must never leak clicks
+/// through to the tab bars underneath.
+pub(crate) fn decode_popup_mouse(
+    mode: &Mode,
+    area: Rect,
+    mouse: crossterm::event::MouseEvent,
+) -> Option<crate::event::Action> {
+    use crate::event::Action;
+    use crossterm::event::{MouseButton, MouseEventKind};
+
+    match mode {
+        Mode::Normal => None,
+        Mode::ConfirmPorts => confirm_click(confirm_ports_popup(area), PORTS_QUESTION, mouse),
+        Mode::ConfirmZoneWalk => {
+            confirm_click(confirm_zone_walk_popup(area), ZONE_WALK_QUESTION, mouse)
+        }
+        Mode::Help => Some(match mouse.kind {
+            MouseEventKind::Down(MouseButton::Left) => Action::InputCancel,
+            _ => Action::None,
+        }),
+        Mode::NewHostPrompt(_) => Some(outside_click_cancels(new_host_prompt_popup(area), mouse)),
+        Mode::ChooseResolver { .. } => {
+            Some(outside_click_cancels(choose_resolver_popup(area), mouse))
+        }
+        Mode::SelectAltName { names, selected } => {
+            Some(select_alt_name_click(area, names.len(), *selected, mouse))
+        }
+        Mode::Settings {
+            selected,
+            editing,
+            message,
+            ..
+        } => Some(settings_click(
+            area,
+            *selected,
+            editing.is_some(),
+            message.is_some(),
+            mouse,
+        )),
+    }
+}
+
+/// A click on a confirm prompt's Yes/No buttons submits directly;
+/// anything else (including a click elsewhere in the popup) returns
+/// `None` so the caller falls through to normal navigation, same as
+/// pressing any key besides `y`/`n`/Esc there already does.
+fn confirm_click(
+    popup: Rect,
+    question: &'static str,
+    mouse: crossterm::event::MouseEvent,
+) -> Option<crate::event::Action> {
+    use crossterm::event::{MouseButton, MouseEventKind};
+    if !matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+        return None;
+    }
+    let (button_row, col_offset) = confirm_button_row_and_col_offset(popup);
+    if mouse.row != button_row {
+        return None;
+    }
+    let local_col = mouse.column.saturating_sub(col_offset);
+    match yes_no_hit(question, local_col) {
+        Some(true) => Some(crate::event::Action::InputChar('y')),
+        Some(false) => Some(crate::event::Action::InputChar('n')),
+        None => None,
+    }
+}
+
+/// A click outside `popup` cancels; a click inside (there's nothing else
+/// clickable in a plain text-entry prompt) or any non-click event does
+/// nothing.
+fn outside_click_cancels(popup: Rect, mouse: crossterm::event::MouseEvent) -> crate::event::Action {
+    use crossterm::event::{MouseButton, MouseEventKind};
+    match mouse.kind {
+        MouseEventKind::Down(MouseButton::Left) => {
+            if popup.contains((mouse.column, mouse.row).into()) {
+                crate::event::Action::None
+            } else {
+                crate::event::Action::InputCancel
+            }
+        }
+        _ => crate::event::Action::None,
+    }
+}
+
+/// Approximates the scroll offset ratatui's stateful `List` settles on
+/// when asked to keep `selected` visible in a `viewport_height`-row
+/// area, starting from an always-fresh (offset 0) `ListState` -- which
+/// is what `render_select_alt_name`/`render_settings` construct on every
+/// frame. Used to translate a click's screen row back into a list index
+/// when there are more items than fit; harmless to get slightly wrong
+/// (worst case, a click selects/opens a neighboring row instead of the
+/// exact one clicked) rather than something this recomputes perfectly.
+fn list_scroll_offset(selected: usize, viewport_height: u16, total: usize) -> usize {
+    let height = viewport_height as usize;
+    if height == 0 || total <= height || selected < height {
+        0
+    } else {
+        (selected - height + 1).min(total.saturating_sub(height))
+    }
+}
+
+fn select_alt_name_click(
+    area: Rect,
+    names_len: usize,
+    selected: usize,
+    mouse: crossterm::event::MouseEvent,
+) -> crate::event::Action {
+    use crate::event::Action;
+    use crossterm::event::{MouseButton, MouseEventKind};
+
+    let popup = select_alt_name_popup(area);
+    match mouse.kind {
+        MouseEventKind::Down(MouseButton::Left) => {
+            if !popup.contains((mouse.column, mouse.row).into()) {
+                return Action::InputCancel;
+            }
+            let list_top = popup.y + 1;
+            let list_height = popup.height.saturating_sub(2);
+            if mouse.row < list_top {
+                return Action::None;
+            }
+            let offset = list_scroll_offset(selected, list_height, names_len);
+            let index = offset + (mouse.row - list_top) as usize;
+            if index < names_len {
+                Action::SelectIndex(index)
+            } else {
+                Action::None
+            }
+        }
+        MouseEventKind::ScrollUp => Action::SelectUp,
+        MouseEventKind::ScrollDown => Action::SelectDown,
+        _ => Action::None,
+    }
+}
+
+fn settings_click(
+    area: Rect,
+    selected: usize,
+    editing: bool,
+    has_message: bool,
+    mouse: crossterm::event::MouseEvent,
+) -> crate::event::Action {
+    use crate::event::Action;
+    use crossterm::event::{MouseButton, MouseEventKind};
+
+    let popup = settings_popup(area);
+    match mouse.kind {
+        MouseEventKind::Down(MouseButton::Left) => {
+            if !popup.contains((mouse.column, mouse.row).into()) {
+                return Action::InputCancel;
+            }
+            if editing {
+                // Don't risk discarding in-progress typed input; the
+                // user needs to confirm/cancel the edit via the keyboard
+                // first, same as clicking a host/pane tab wouldn't
+                // abandon it either.
+                return Action::None;
+            }
+            let list_top = popup.y + 1;
+            let field_count = crate::settings::fields().len();
+            if mouse.row < list_top {
+                return Action::None;
+            }
+            // Below the list: a fixed Length(2) help-text chunk, plus a
+            // Length(1) message chunk only when there's a message to show
+            // (see `render_settings`'s own `Layout`).
+            let reserved_below = 2 + u16::from(has_message);
+            let list_height = popup
+                .height
+                .saturating_sub(2)
+                .saturating_sub(reserved_below);
+            let offset = list_scroll_offset(selected, list_height, field_count);
+            let index = offset + (mouse.row - list_top) as usize;
+            if index < field_count {
+                Action::SelectIndex(index)
+            } else {
+                Action::None
+            }
+        }
+        MouseEventKind::ScrollUp if !editing => Action::SelectUp,
+        MouseEventKind::ScrollDown if !editing => Action::SelectDown,
+        _ => Action::None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
@@ -574,7 +830,7 @@ mod tests {
     use crate::checks::ping::{PingMethod, PingSample, PingUpdate};
     use crate::checks::{CheckId, SharedResultsHandle};
     use crate::config::Config;
-    use crate::event::CheckUpdate;
+    use crate::event::{Action, CheckUpdate};
     use crate::providers::{Confidence, Detection, Evidence, Layer, ProviderDb};
     use crate::target::Target;
 
@@ -1020,5 +1276,139 @@ mod tests {
         state.tabs[0].active_pane = Pane::ALL.iter().position(|&p| p == Pane::Geo).unwrap();
         terminal.draw(|frame| draw(frame, &state)).unwrap();
         println!("{}", buffer_to_string(terminal.backend().buffer()));
+    }
+
+    fn left_click(row: u16, column: u16) -> crossterm::event::MouseEvent {
+        crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            column,
+            row,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        }
+    }
+
+    #[test]
+    fn yes_no_hit_finds_yes_no_and_neither() {
+        let spans = yes_no_spans(PORTS_QUESTION);
+        let yes_col = spans[0].width() as u16; // right after the question text
+        let no_col = yes_col + spans[1].width() as u16 + spans[2].width() as u16;
+        assert_eq!(yes_no_hit(PORTS_QUESTION, yes_col), Some(true));
+        assert_eq!(yes_no_hit(PORTS_QUESTION, no_col), Some(false));
+        assert_eq!(
+            yes_no_hit(PORTS_QUESTION, 0),
+            None,
+            "lands on the question text itself"
+        );
+    }
+
+    #[test]
+    fn confirm_click_only_fires_on_the_button_row() {
+        let area = Rect::new(0, 0, 100, 40);
+        let popup = confirm_ports_popup(area);
+        let (button_row, col_offset) = confirm_button_row_and_col_offset(popup);
+        let yes_col = col_offset + yes_no_spans(PORTS_QUESTION)[0].width() as u16;
+
+        assert_eq!(
+            confirm_click(popup, PORTS_QUESTION, left_click(button_row, yes_col)),
+            Some(Action::InputChar('y'))
+        );
+        // One row above the button: inside the popup, but not the
+        // button row -- falls through (None), same as any other click
+        // that doesn't land on a button.
+        assert_eq!(
+            confirm_click(popup, PORTS_QUESTION, left_click(button_row - 1, yes_col)),
+            None
+        );
+    }
+
+    #[test]
+    fn outside_click_cancels_only_when_truly_outside() {
+        let area = Rect::new(0, 0, 100, 40);
+        let popup = new_host_prompt_popup(area);
+        assert_eq!(
+            outside_click_cancels(popup, left_click(popup.y, popup.x)),
+            Action::None,
+            "inside the popup"
+        );
+        assert_eq!(
+            outside_click_cancels(popup, left_click(0, 0)),
+            Action::InputCancel,
+            "the far corner is outside every popup on a 100x40 terminal"
+        );
+    }
+
+    #[test]
+    fn list_scroll_offset_only_scrolls_once_selection_outgrows_the_viewport() {
+        assert_eq!(list_scroll_offset(0, 10, 5), 0, "fewer items than fit");
+        assert_eq!(
+            list_scroll_offset(3, 10, 20),
+            0,
+            "selection still on-screen"
+        );
+        assert_eq!(
+            list_scroll_offset(15, 10, 20),
+            6,
+            "selection past the viewport pulls the list up to keep it visible"
+        );
+    }
+
+    #[test]
+    fn select_alt_name_click_selects_and_opens_the_clicked_row() {
+        let area = Rect::new(0, 0, 100, 40);
+        let popup = select_alt_name_popup(area);
+        let second_row = popup.y + 1 + 1; // inner top, then the 2nd item
+        assert_eq!(
+            select_alt_name_click(area, 5, 0, left_click(second_row, popup.x + 2)),
+            Action::SelectIndex(1)
+        );
+    }
+
+    #[test]
+    fn select_alt_name_click_outside_the_popup_cancels() {
+        let area = Rect::new(0, 0, 100, 40);
+        assert_eq!(
+            select_alt_name_click(area, 5, 0, left_click(0, 0)),
+            Action::InputCancel
+        );
+    }
+
+    #[test]
+    fn settings_click_opens_the_clicked_field_when_not_editing() {
+        let area = Rect::new(0, 0, 100, 40);
+        let popup = settings_popup(area);
+        let third_row = popup.y + 1 + 2; // inner top, then the 3rd field
+        assert_eq!(
+            settings_click(area, 0, false, false, left_click(third_row, popup.x + 2)),
+            Action::SelectIndex(2)
+        );
+    }
+
+    #[test]
+    fn settings_click_is_a_no_op_while_editing_to_avoid_losing_input() {
+        let area = Rect::new(0, 0, 100, 40);
+        let popup = settings_popup(area);
+        let third_row = popup.y + 1 + 2;
+        assert_eq!(
+            settings_click(area, 0, true, false, left_click(third_row, popup.x + 2)),
+            Action::None
+        );
+    }
+
+    #[test]
+    fn decode_popup_mouse_is_none_for_normal_mode() {
+        let area = Rect::new(0, 0, 100, 40);
+        assert_eq!(
+            decode_popup_mouse(&Mode::Normal, area, left_click(5, 5)),
+            None
+        );
+    }
+
+    #[test]
+    fn decode_popup_mouse_closes_help_on_any_click() {
+        let area = Rect::new(0, 0, 100, 40);
+        assert_eq!(
+            decode_popup_mouse(&Mode::Help, area, left_click(0, 0)),
+            Some(Action::InputCancel)
+        );
     }
 }

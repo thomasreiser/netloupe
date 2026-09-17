@@ -40,6 +40,13 @@ pub enum Action {
     /// selectable-list mode).
     SelectUp,
     SelectDown,
+    /// Jumps a list-picker mode's selection directly to an index, e.g.
+    /// from clicking a row. Interpreted per-mode: in `Mode::SelectAltName`
+    /// it also opens that name immediately (a click is one deliberate
+    /// choice, with no separate mouse "confirm" step the way Enter is
+    /// from the keyboard); in `Mode::Settings` it also starts editing
+    /// that field, but only when nothing else is already being edited.
+    SelectIndex(usize),
     /// Scrolls the active pane's content, for panes whose content is
     /// taller than the terminal (a long SAN list, a large DNS zone's
     /// records, ...).
