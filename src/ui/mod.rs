@@ -352,7 +352,7 @@ fn select_alt_name_popup(area: Rect) -> Rect {
     centered_rect(64, 60, area)
 }
 fn help_popup(area: Rect) -> Rect {
-    centered_rect(56, 75, area)
+    centered_rect(56, 80, area)
 }
 fn data_info_popup(area: Rect) -> Rect {
     centered_rect(80, 75, area)
@@ -908,7 +908,12 @@ fn render_data_info(
         }
     }
 
-    frame.render_widget(Paragraph::new(lines).scroll((scroll, 0)), inner);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .scroll((scroll, 0)),
+        inner,
+    );
 }
 
 /// Renders a byte count in the coarsest unit that keeps one decimal of
@@ -1997,7 +2002,6 @@ mod tests {
         );
     }
 
-
     /// Once a check has a coordinate, the Geo pane must show the world
     /// map (see `worldmap::render_map`) with a pinpoint on it, not just
     /// the plain country/city table.
@@ -2092,6 +2096,26 @@ mod tests {
         }];
         state.tabs[0].focused_link = Some(0);
         render_at(20, 6, |frame| draw(frame, &state));
+    }
+
+    /// Every row of the help overlay (including "d" and "mouse", the
+    /// last two) must actually be visible at a standard 80x24 terminal,
+    /// not clipped by a popup height that was sized for a shorter list.
+    #[test]
+    fn help_overlay_fits_every_row_at_80x24() {
+        let mut state = AppState::new(Config::default(), ProviderDb::default());
+        state.mode = Mode::Help;
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| draw(frame, &state)).unwrap();
+        let content = buffer_to_string(terminal.backend().buffer());
+
+        assert!(content.contains("Show what data was dow"), "{content}");
+        assert!(content.contains("mouse"), "{content}");
+        assert!(
+            content.contains("Click a tab, a hostnam"),
+            "expected the mouse row's description, not just its clipped key column: {content}"
+        );
     }
 
     #[test]
