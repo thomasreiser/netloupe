@@ -126,6 +126,13 @@ impl Target {
         let target = Self::parse(input)?;
         if let Target::Host { ascii, .. } = &target {
             let trimmed = ascii.trim_end_matches('.');
+            // The one bare single-label hostname that's always a real,
+            // resolvable target regardless of the "at least 2 labels"
+            // rule below -- unlike "Cert" or "42", nobody writes
+            // "localhost" as plain text meaning anything else.
+            if trimmed.eq_ignore_ascii_case("localhost") {
+                return Ok(target);
+            }
             let labels: Vec<&str> = trimmed.split('.').collect();
             // Real TLDs are always at least 2 letters (ICANN requires
             // it) -- without this, ordinary two-initial abbreviations
@@ -309,5 +316,15 @@ mod tests {
         assert!(Target::parse_strict("a.iana-servers.net.").is_ok());
         assert!(Target::parse_strict("8.8.8.8").is_ok());
         assert!(Target::parse_strict("2606:4700:4700::1111").is_ok());
+    }
+
+    #[test]
+    fn parse_strict_accepts_localhost_despite_being_a_single_label() {
+        // The one bare single-label hostname carved out of the "at least
+        // 2 labels" rule above -- it's a real, always-resolvable target,
+        // unlike "Cert" or "42".
+        assert!(Target::parse_strict("localhost").is_ok());
+        assert!(Target::parse_strict("LOCALHOST").is_ok());
+        assert!(Target::parse_strict("localhost.").is_ok());
     }
 }
