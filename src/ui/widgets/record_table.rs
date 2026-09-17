@@ -14,6 +14,13 @@ use crate::ui::theme;
 const TYPE_WIDTH: u16 = 8;
 const TTL_WIDTH: u16 = 8;
 const COLUMN_SPACING: u16 = 1;
+/// The value column is `Constraint::Fill(1)`, which stretches to
+/// consume the *entire* remaining width of whatever area it's given --
+/// harmless for most content, but on a wide terminal it strands the TTL
+/// column far to the right of the values it describes, behind a large
+/// empty gap easy to miss entirely. Capping the table's own width keeps
+/// TTL adjacent to the content instead.
+const MAX_TABLE_WIDTH: u16 = 100;
 
 /// One row: the record type (e.g. "A", "MX"), its rendered value, and
 /// its TTL already formatted for display (e.g. "300s", or "-" when
@@ -27,6 +34,10 @@ pub struct RecordRow {
 /// Renders the table scrolled so row `scroll` is the first one shown,
 /// same as `kv_table::render`.
 pub fn render(frame: &mut Frame, area: Rect, rows: &[RecordRow], scroll: u16) {
+    let area = Rect {
+        width: area.width.min(MAX_TABLE_WIDTH),
+        ..area
+    };
     let value_width = area
         .width
         .saturating_sub(TYPE_WIDTH + TTL_WIDTH + COLUMN_SPACING * 2)

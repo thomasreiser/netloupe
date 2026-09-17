@@ -24,9 +24,13 @@ pub fn render(frame: &mut Frame, area: Rect, rows: &[(String, String)], scroll: 
     render_impl(frame, area, None, rows, scroll);
 }
 
-/// Same as [`render`], with a header row labeling the two columns —
-/// for a table whose columns aren't self-evident from context the way
-/// most `kv_table` uses (a record type name, a cert field) already are.
+/// Same as [`render`], with a header row labeling the two columns, and
+/// the value column capped to a sane width -- for a table whose columns
+/// aren't self-evident from context the way most `kv_table` uses (a
+/// record type name, a cert field) already are, and whose values (so
+/// far: nameserver names) are short enough that stretching to fill a
+/// wide terminal would just strand the second column's header/values
+/// far to the right of the content, behind a large empty gap.
 pub fn render_with_header(
     frame: &mut Frame,
     area: Rect,
@@ -34,6 +38,11 @@ pub fn render_with_header(
     rows: &[(String, String)],
     scroll: u16,
 ) {
+    const MAX_TABLE_WIDTH: u16 = 60;
+    let area = Rect {
+        width: area.width.min(MAX_TABLE_WIDTH),
+        ..area
+    };
     render_impl(frame, area, Some(header), rows, scroll);
 }
 
