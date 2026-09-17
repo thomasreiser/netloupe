@@ -12,7 +12,9 @@ use std::net::IpAddr;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap};
+use ratatui::widgets::{
+    Block, BorderType, Borders, Cell, Clear, Paragraph, Row, Table, TableState, Wrap,
+};
 use ratatui::Frame;
 
 use crate::app::{AppState, Mode};
@@ -840,32 +842,46 @@ fn render_data_info(
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
 
+    // A real `Table` rather than manually padding fixed-width strings:
+    // a provider name is external, variable-length data (e.g. "Oracle
+    // Cloud Infrastructure" runs well past a short label's assumed
+    // width), and padding-by-hand only keeps later columns aligned for
+    // names that happen to fit the guessed width -- anything longer
+    // shifts every column after it out of alignment instead of just
+    // being truncated in its own column the way a real table handles
+    // it.
+    const NAME_WIDTH: u16 = 30;
+    const SIZE_WIDTH: u16 = 10;
+    const AGE_WIDTH: u16 = 10;
+
     let section_title = |title: &str| {
-        Line::from(Span::styled(
+        Row::new(vec![Cell::from(Span::styled(
             title.to_string(),
             Style::default()
                 .fg(theme::CYAN)
                 .add_modifier(Modifier::BOLD),
-        ))
+        ))])
     };
-    let dim = |text: String| Line::from(Span::styled(text, Style::default().fg(theme::FAINT)));
-    let row =
+    let dim = |text: String| {
+        Row::new(vec![Cell::from(Span::styled(
+            text,
+            Style::default().fg(theme::FAINT),
+        ))])
+    };
+    let data_row =
         |label: &str, size_bytes: u64, modified: Option<std::time::SystemTime>, source: &str| {
             let age = modified
                 .map(|t| format!("{} ago", refresh::humanize_age(refresh::age_of(t))))
                 .unwrap_or_else(|| "-".to_string());
-            Line::from(vec![
-                Span::styled(format!("  {label:<22}"), Style::default().fg(theme::TEXT)),
-                Span::styled(
-                    format!("{:>10}  ", format_bytes(size_bytes)),
-                    Style::default().fg(theme::MUTED),
-                ),
-                Span::styled(format!("{age:>9}  "), Style::default().fg(theme::MUTED)),
-                Span::styled(source.to_string(), Style::default().fg(theme::FAINT)),
+            Row::new(vec![
+                Cell::from(format!("  {label}")).style(Style::default().fg(theme::TEXT)),
+                Cell::from(format_bytes(size_bytes)).style(Style::default().fg(theme::MUTED)),
+                Cell::from(age).style(Style::default().fg(theme::MUTED)),
+                Cell::from(source.to_string()).style(Style::default().fg(theme::FAINT)),
             ])
         };
 
-    let mut lines: Vec<Line> = vec![
+    let mut rows: Vec<Row> = vec![
         section_title("Provider ranges (Hosting pane)"),
         dim(match ranges_cache_dir {
             Some(dir) => format!("cache: {}", dir.display()),
@@ -874,12 +890,12 @@ fn render_data_info(
         dim(state.ranges.status_text()),
     ];
     if ranges_files.is_empty() {
-        lines.push(dim(
+        rows.push(dim(
             "  nothing downloaded yet -- using the bundled snapshot".to_string(),
         ));
     } else {
         for f in ranges_files {
-            lines.push(row(
+            rows.push(data_row(
                 &f.provider_name,
                 f.file.size_bytes,
                 f.file.modified,
@@ -888,18 +904,18 @@ fn render_data_info(
         }
     }
 
-    lines.push(Line::default());
-    lines.push(section_title("GeoIP (Geo pane)"));
-    lines.push(dim(match geoip_cache_dir {
+    rows.push(Row::new(Vec::<Cell>::new()));
+    rows.push(section_title("GeoIP (Geo pane)"));
+    rows.push(dim(match geoip_cache_dir {
         Some(dir) => format!("cache: {}", dir.display()),
         None => "cache: unavailable on this platform".to_string(),
     }));
-    lines.push(dim(state.geoip.status_text()));
+    rows.push(dim(state.geoip.status_text()));
     if geoip_files.is_empty() {
-        lines.push(dim("  not downloaded yet".to_string()));
+        rows.push(dim("  not downloaded yet".to_string()));
     } else {
         for f in geoip_files {
-            lines.push(row(
+            rows.push(data_row(
                 f.edition_id,
                 f.file.size_bytes,
                 f.file.modified,
@@ -908,12 +924,30 @@ fn render_data_info(
         }
     }
 
-    frame.render_widget(
-        Paragraph::new(lines)
-            .wrap(Wrap { trim: false })
-            .scroll((scroll, 0)),
-        inner,
-    );
+    let header_style = Style::default()
+        .fg(theme::MUTED)
+        .add_modifier(Modifier::BOLD);
+    let header = Row::new(vec![
+        Cell::from("  NAME").style(header_style),
+        Cell::from("SIZE").style(header_style),
+        Cell::from("AGE").style(header_style),
+        Cell::from("SOURCE").style(header_style),
+    ]);
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Length(NAME_WIDTH),
+            Constraint::Length(SIZE_WIDTH),
+            Constraint::Length(AGE_WIDTH),
+            Constraint::Fill(1),
+        ],
+    )
+    .header(header);
+
+    let max_offset = ranges_files.len() + geoip_files.len();
+    let mut table_state = TableState::default();
+    *table_state.offset_mut() = (scroll as usize).min(max_offset);
+    frame.render_stateful_widget(table, inner, &mut table_state);
 }
 
 /// Renders a byte count in the coarsest unit that keeps one decimal of
@@ -2115,6 +2149,65 @@ mod tests {
         assert!(
             content.contains("Click a tab, a hostnam"),
             "expected the mouse row's description, not just its clipped key column: {content}"
+        );
+    }
+
+    /// A long provider name (e.g. "Oracle Cloud Infrastructure", the
+    /// longest of the bundled providers) must not shift the SIZE/AGE
+    /// columns of *other* rows out of alignment -- a real `Table`
+    /// widget confines each cell to its own column no matter how long
+    /// its content is, unlike hand-padding a fixed-width string.
+    #[test]
+    fn data_info_popup_keeps_columns_aligned_with_a_long_provider_name() {
+        let mut state = AppState::new(Config::default(), ProviderDb::default());
+        let file = |size, secs_ago: u64| refresh::CachedFile {
+            filename: "x".to_string(),
+            size_bytes: size,
+            modified: Some(std::time::SystemTime::now() - Duration::from_secs(secs_ago)),
+        };
+        state.mode = Mode::DataInfo {
+            geoip_cache_dir: Some(PathBuf::from("/tmp/geoip")),
+            geoip_files: vec![],
+            ranges_cache_dir: Some(PathBuf::from("/tmp/ranges")),
+            ranges_files: vec![
+                crate::providers::update::CachedRangeFile {
+                    provider_id: "cloudflare".to_string(),
+                    provider_name: "Cloudflare".to_string(),
+                    source_url: "https://www.cloudflare.com/ips-v4".to_string(),
+                    file: file(230, 180),
+                },
+                crate::providers::update::CachedRangeFile {
+                    provider_id: "oracle".to_string(),
+                    provider_name: "Oracle Cloud Infrastructure".to_string(),
+                    source_url: "https://docs.oracle.com/en-us/iaas/tools/public_ip_ranges.json"
+                        .to_string(),
+                    file: file(228_600, 180),
+                },
+            ],
+            scroll: 0,
+        };
+        let backend = TestBackend::new(120, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| draw(frame, &state)).unwrap();
+        let content = buffer_to_string(terminal.backend().buffer());
+
+        // The full (untruncated) long name must appear...
+        assert!(content.contains("Oracle Cloud Infrastructure"), "{content}");
+        let cloudflare_row = content
+            .lines()
+            .find(|l| l.contains("Cloudflare") && l.contains("230 B"))
+            .expect("expected Cloudflare's row");
+        let oracle_row = content
+            .lines()
+            .find(|l| l.contains("Oracle Cloud Infrastructure") && l.contains("KiB"))
+            .expect("expected Oracle's row");
+        // ...and the SIZE column must start at the same screen column on
+        // both rows, regardless of how much longer Oracle's name is.
+        let size_col = |line: &str| line.find("230 B").or_else(|| line.find("223.2 KiB"));
+        assert_eq!(
+            size_col(cloudflare_row),
+            size_col(oracle_row),
+            "the SIZE column must line up across rows: {cloudflare_row:?} vs {oracle_row:?}"
         );
     }
 
