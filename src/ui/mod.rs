@@ -463,6 +463,7 @@ fn render_settings(
         .iter()
         .enumerate()
         .map(|(i, field)| {
+            let is_editing = i == selected && editing.is_some();
             let value = if i == selected {
                 editing
                     .map(str::to_string)
@@ -470,8 +471,19 @@ fn render_settings(
             } else {
                 (field.get)(draft)
             };
-            let value = if value.is_empty() {
+            let value = if value.is_empty() && !is_editing {
                 "-".to_string()
+            } else {
+                value
+            };
+            // A blinking-caret-style cursor directly after the value
+            // being typed -- the row's own highlight color (below) also
+            // switches while editing, but this is what actually marks
+            // *where* keystrokes land, since the highlighted row alone
+            // looks identical whether it's merely selected or being
+            // actively typed into.
+            let value = if is_editing {
+                format!("{value}▏")
             } else {
                 value
             };
@@ -486,14 +498,24 @@ fn render_settings(
             ]))
         })
         .collect();
+    // Editing a field gets a distinct highlight color from merely having
+    // it selected (cyan, the same "selected row" language used
+    // elsewhere in this app), so the one row you're actively typing
+    // into is unmistakable at a glance rather than looking identical to
+    // ordinary ↑/↓ navigation.
+    let highlight_bg = if editing.is_some() {
+        theme::YELLOW
+    } else {
+        theme::CYAN
+    };
     let list = ratatui::widgets::List::new(items)
         .highlight_style(
             Style::default()
                 .fg(Color::Rgb(18, 18, 24))
-                .bg(theme::CYAN)
+                .bg(highlight_bg)
                 .add_modifier(Modifier::BOLD),
         )
-        .highlight_symbol("❯ ");
+        .highlight_symbol(if editing.is_some() { "✎ " } else { "❯ " });
     let mut list_state = ratatui::widgets::ListState::default().with_selected(Some(selected));
     frame.render_stateful_widget(list, chunks[0], &mut list_state);
 
@@ -1697,6 +1719,56 @@ mod tests {
         assert_eq!(
             select_alt_name_click(area, 5, 0, left_click(0, 0)),
             Action::InputCancel
+        );
+    }
+
+    /// Actively editing a field must look visibly different from merely
+    /// having it selected -- a cursor right after the in-progress value,
+    /// and a distinct (yellow, not cyan) row highlight -- since both
+    /// states otherwise render identically apart from a faint cursor
+    /// buried in the help line below.
+    #[test]
+    fn settings_editing_a_field_is_visually_distinct_from_just_selecting_it() {
+        let backend = TestBackend::new(100, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        let mut selected_only = AppState::new(Config::default(), ProviderDb::default());
+        selected_only.mode = Mode::Settings {
+            draft: Box::new(Config::default()),
+            selected: 0,
+            editing: None,
+            message: None,
+        };
+        terminal.draw(|frame| draw(frame, &selected_only)).unwrap();
+        let not_editing = buffer_to_string(terminal.backend().buffer());
+        assert!(
+            !not_editing.contains('▏'),
+            "no cursor should appear on a merely-selected row"
+        );
+
+        let mut editing = AppState::new(Config::default(), ProviderDb::default());
+        editing.mode = Mode::Settings {
+            draft: Box::new(Config::default()),
+            selected: 0,
+            editing: Some("1.1.1.1".to_string()),
+            message: None,
+        };
+        terminal.draw(|frame| draw(frame, &editing)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let content = buffer_to_string(buffer);
+        assert!(
+            content.contains("1.1.1.1▏"),
+            "expected a cursor directly after the in-progress value: {content}"
+        );
+
+        let row = (0..buffer.area.height)
+            .find(|&y| (0..buffer.area.width).any(|x| buffer.cell((x, y)).unwrap().symbol() == "▏"))
+            .expect("the cursor glyph must be on screen somewhere");
+        let has_yellow_bg =
+            (0..buffer.area.width).any(|x| buffer.cell((x, row)).unwrap().bg == theme::YELLOW);
+        assert!(
+            has_yellow_bg,
+            "the actively-edited row should be highlighted yellow, not the normal selection cyan"
         );
     }
 
