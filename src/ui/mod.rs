@@ -1256,6 +1256,41 @@ mod tests {
         );
     }
 
+    /// Each row of Overview's cards is sized to its tallest card's
+    /// actual content (plus border), not a fixed 50% of the pane --
+    /// otherwise a card with only 1-2 lines of content balloons into a
+    /// mostly empty box on a tall terminal. Alternative Hostnames
+    /// should get whatever's left over instead.
+    #[test]
+    fn overview_cards_stay_compact_on_a_tall_terminal() {
+        let mut state = AppState::new(Config::default(), ProviderDb::default());
+        state.tabs.push(populated_tab());
+
+        let backend = TestBackend::new(120, 80);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| draw(frame, &state)).unwrap();
+        let content = buffer_to_string(terminal.backend().buffer());
+
+        // The TARGET card has 2 real content lines (Host, IPs); its
+        // bottom border should be only a few rows below that, not
+        // dozens of rows down from a 50%-of-80-row split.
+        let ips_row = content
+            .lines()
+            .position(|l| l.contains("IPs") && l.contains("93.184.216.34"))
+            .expect("expected the TARGET card's IPs row");
+        let card_bottom_border = content
+            .lines()
+            .skip(ips_row)
+            .position(|l| l.contains('╰'))
+            .map(|offset| ips_row + offset)
+            .expect("expected the TARGET card's bottom border");
+        assert!(
+            card_bottom_border - ips_row <= 4,
+            "the TARGET card should be sized to its content, not balloon on a tall terminal \
+             (IPs row {ips_row}, bottom border {card_bottom_border}): {content}"
+        );
+    }
+
     /// `Config::show_country_flags` gates a flag emoji next to a
     /// country everywhere one's shown -- off by default, on once set,
     /// in both the Overview dashboard's Country card and the Geo pane's
