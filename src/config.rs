@@ -210,6 +210,12 @@ pub struct HostingConfig {
     /// Warn when cached/snapshot range data is older than this.
     #[serde(with = "humantime_serde")]
     pub max_data_age: Duration,
+    /// How often `providers::update::run_background_updater` refreshes the
+    /// on-disk range-list cache (the same cache `netloupe update-data`
+    /// writes to). Checked opportunistically on a timer while the TUI is
+    /// open, not pinned to a wall-clock schedule.
+    #[serde(with = "humantime_serde")]
+    pub range_update_interval: Duration,
     /// Extra directory to load user-defined `*.toml` signatures from, e.g.
     /// for an internal company IP range.
     pub extra_signature_dir: Option<PathBuf>,
@@ -221,6 +227,7 @@ impl Default for HostingConfig {
             disabled_providers: Vec::new(),
             min_confidence: crate::providers::Confidence::Low,
             max_data_age: Duration::from_secs(30 * 24 * 3600),
+            range_update_interval: Duration::from_secs(24 * 3600),
             extra_signature_dir: None,
         }
     }
@@ -322,6 +329,10 @@ mod tests {
         assert!(!c.ports.scan_list.is_empty());
         assert_eq!(c.theme, "default");
         assert_eq!(c.geoip.update_interval, Duration::from_secs(24 * 3600));
+        assert_eq!(
+            c.hosting.range_update_interval,
+            Duration::from_secs(24 * 3600)
+        );
     }
 
     #[test]
