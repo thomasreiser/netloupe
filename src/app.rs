@@ -249,6 +249,12 @@ pub struct AppState {
     /// keyboard focus; `app::decode_mouse` reads it to hit-test clicks
     /// on pane content.
     pub clickable_spans: Vec<crate::ui::linkscan::ClickableSpan>,
+    /// The DNS servers this machine is actually configured to use (see
+    /// `checks::dns::system_resolver_ips`), read once at startup since
+    /// they don't change over the life of a session. Empty if they
+    /// couldn't be determined. `Mode::ChooseResolver`'s popup shows
+    /// these so blank input's "system default" isn't a black box.
+    pub system_resolvers: Vec<IpAddr>,
     next_tab_id: AtomicU64,
 }
 
@@ -267,6 +273,7 @@ impl AppState {
             geoip: crate::geoip::GeoipStatus::default(),
             geoip_config_tx: None,
             clickable_spans: Vec::new(),
+            system_resolvers: crate::checks::dns::system_resolver_ips(),
             next_tab_id: AtomicU64::new(1),
         }
     }

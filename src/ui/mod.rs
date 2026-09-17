@@ -7,6 +7,8 @@ pub mod tabs;
 pub mod theme;
 pub mod widgets;
 
+use std::net::IpAddr;
+
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -91,7 +93,7 @@ pub fn draw(frame: &mut Frame, state: &AppState) {
             render_select_alt_name(frame, area, names, *selected)
         }
         Mode::ChooseResolver { target, input } => {
-            render_choose_resolver(frame, area, target, input)
+            render_choose_resolver(frame, area, target, input, &state.system_resolvers)
         }
         Mode::Settings {
             draft,
@@ -278,7 +280,7 @@ fn new_host_prompt_popup(area: Rect) -> Rect {
     centered_rect(60, 15, area)
 }
 fn choose_resolver_popup(area: Rect) -> Rect {
-    centered_rect(64, 20, area)
+    centered_rect(66, 28, area)
 }
 pub(crate) fn settings_popup(area: Rect) -> Rect {
     centered_rect(76, 80, area)
@@ -315,11 +317,33 @@ fn render_prompt(frame: &mut Frame, area: Rect, buf: &str) {
     frame.render_widget(text, inner);
 }
 
+/// Formats up to the first 3 of `system_resolvers` as a comma-separated
+/// list (with a "+N more" suffix beyond that), or `None` when nothing
+/// could be determined -- shared by `render_choose_resolver`'s hint line
+/// and its input-field placeholder so the two never disagree.
+fn system_resolvers_summary(system_resolvers: &[IpAddr]) -> Option<String> {
+    if system_resolvers.is_empty() {
+        return None;
+    }
+    let shown: Vec<String> = system_resolvers
+        .iter()
+        .take(3)
+        .map(IpAddr::to_string)
+        .collect();
+    let extra = system_resolvers.len().saturating_sub(shown.len());
+    Some(if extra > 0 {
+        format!("{} +{extra} more", shown.join(", "))
+    } else {
+        shown.join(", ")
+    })
+}
+
 fn render_choose_resolver(
     frame: &mut Frame,
     area: Rect,
     target: &crate::target::Target,
     input: &str,
+    system_resolvers: &[IpAddr],
 ) {
     let popup = choose_resolver_popup(area);
     frame.render_widget(Clear, popup);
@@ -334,9 +358,20 @@ fn render_choose_resolver(
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(2), Constraint::Length(1)])
+        .constraints([Constraint::Length(3), Constraint::Length(1)])
         .split(inner);
 
+    let summary = system_resolvers_summary(system_resolvers);
+    // The field's own placeholder (below) already shows the actual
+    // server IPs when there's just one or none to name, so this line
+    // only needs to add anything when there's more than one -- that a
+    // typed IP pins to exactly it, while blank leaves the choice among
+    // several up to the OS.
+    let blank_line = if system_resolvers.len() > 1 {
+        "blank = system default (OS picks among those shown below)"
+    } else {
+        "blank = system default"
+    };
     let prompt = Paragraph::new(vec![
         Line::from(vec![
             Span::styled("Query ", Style::default().fg(theme::MUTED)),
@@ -351,18 +386,31 @@ fn render_choose_resolver(
                 Style::default().fg(theme::MUTED),
             ),
         ]),
+        Line::from(Span::styled(blank_line, Style::default().fg(theme::FAINT))),
         Line::from(Span::styled(
-            "blank = system default",
+            "a typed IP pins every lookup to just that one server",
             Style::default().fg(theme::FAINT),
         )),
     ]);
     frame.render_widget(prompt, chunks[0]);
 
-    let text = Paragraph::new(Line::from(vec![
-        Span::styled("❯ ", Style::default().fg(theme::CYAN)),
-        Span::styled(input, Style::default().fg(theme::TEXT)),
-        Span::styled("▏", Style::default().fg(theme::CYAN)),
-    ]));
+    // An empty field shows the system's actual resolver(s) as dim
+    // placeholder text (never real input) so "blank" isn't a leap of
+    // faith about what it resolves to.
+    let text = if input.is_empty() {
+        let placeholder = summary.unwrap_or_else(|| "system default".to_string());
+        Paragraph::new(Line::from(vec![
+            Span::styled("❯ ", Style::default().fg(theme::CYAN)),
+            Span::styled("▏", Style::default().fg(theme::CYAN)),
+            Span::styled(placeholder, Style::default().fg(theme::FAINT)),
+        ]))
+    } else {
+        Paragraph::new(Line::from(vec![
+            Span::styled("❯ ", Style::default().fg(theme::CYAN)),
+            Span::styled(input, Style::default().fg(theme::TEXT)),
+            Span::styled("▏", Style::default().fg(theme::CYAN)),
+        ]))
+    };
     frame.render_widget(text, chunks[1]);
 }
 
@@ -1365,6 +1413,70 @@ mod tests {
             render_at(100, 30, |frame| draw(frame, &state));
             render_at(20, 6, |frame| draw(frame, &state));
         }
+    }
+
+    #[test]
+    fn system_resolvers_summary_lists_up_to_three_and_counts_the_rest() {
+        let ip = |s: &str| s.parse().unwrap();
+        assert_eq!(system_resolvers_summary(&[]), None);
+        assert_eq!(
+            system_resolvers_summary(&[ip("1.1.1.1")]),
+            Some("1.1.1.1".to_string())
+        );
+        assert_eq!(
+            system_resolvers_summary(&[ip("1.1.1.1"), ip("8.8.8.8")]),
+            Some("1.1.1.1, 8.8.8.8".to_string())
+        );
+        assert_eq!(
+            system_resolvers_summary(
+                &[ip("1.1.1.1"), ip("8.8.8.8"), ip("9.9.9.9"), ip("1.0.0.1"),]
+            ),
+            Some("1.1.1.1, 8.8.8.8, 9.9.9.9 +1 more".to_string())
+        );
+    }
+
+    /// An empty `ChooseResolver` input shows the machine's actual DNS
+    /// servers as placeholder text instead of a blank field, and the
+    /// hint line above it calls out that the OS picks among them when
+    /// there's more than one -- see `system_resolvers_summary`.
+    #[test]
+    fn choose_resolver_shows_system_servers_as_a_placeholder() {
+        let mut state = AppState::new(Config::default(), ProviderDb::default());
+        state.tabs.push(populated_tab());
+        state.mode = Mode::ChooseResolver {
+            target: Target::parse("example.com").unwrap(),
+            input: String::new(),
+        };
+
+        state.system_resolvers = vec!["192.168.1.1".parse().unwrap()];
+        let backend = TestBackend::new(100, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| draw(frame, &state)).unwrap();
+        let content = buffer_to_string(terminal.backend().buffer());
+        assert!(
+            content.contains("192.168.1.1"),
+            "single system resolver should appear as placeholder text"
+        );
+
+        state.system_resolvers = vec!["192.168.1.1".parse().unwrap(), "8.8.8.8".parse().unwrap()];
+        terminal.draw(|frame| draw(frame, &state)).unwrap();
+        let content = buffer_to_string(terminal.backend().buffer());
+        assert!(
+            content.contains("192.168.1.1, 8.8.8.8"),
+            "both system resolvers should appear as placeholder text"
+        );
+        assert!(
+            content.contains("OS picks among those shown below"),
+            "multiple system resolvers should get a clarifying hint"
+        );
+
+        state.system_resolvers = Vec::new();
+        terminal.draw(|frame| draw(frame, &state)).unwrap();
+        let content = buffer_to_string(terminal.backend().buffer());
+        assert!(
+            content.contains("system default"),
+            "an undetermined system resolver still falls back to a generic label"
+        );
     }
 
     fn buffer_to_string(buffer: &ratatui::buffer::Buffer) -> String {
