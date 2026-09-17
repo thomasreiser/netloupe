@@ -10,6 +10,7 @@ pub mod config;
 pub mod event;
 pub mod geoip;
 pub mod providers;
+pub mod refresh;
 pub mod retry;
 pub mod settings;
 pub mod target;

@@ -16,6 +16,7 @@ use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap};
 use ratatui::Frame;
 
 use crate::app::{AppState, Mode};
+use crate::refresh;
 
 /// The overall vertical layout inside the outer frame's border: host
 /// tabs, pane tabs, body, status line. Factored out so `body_area` (used
@@ -113,6 +114,22 @@ pub fn draw(frame: &mut Frame, state: &AppState) {
             *selected,
             editing.as_deref(),
             message.as_deref(),
+        ),
+        Mode::DataInfo {
+            geoip_cache_dir,
+            geoip_files,
+            ranges_cache_dir,
+            ranges_files,
+            scroll,
+        } => render_data_info(
+            frame,
+            area,
+            state,
+            geoip_cache_dir.as_deref(),
+            geoip_files,
+            ranges_cache_dir.as_deref(),
+            ranges_files,
+            *scroll,
         ),
         Mode::Normal => {}
     }
@@ -233,6 +250,9 @@ fn render_status_line(frame: &mut Frame, area: Rect, state: &AppState) {
     spans.push(key("s"));
     spans.push(desc(" settings "));
     spans.push(sep());
+    spans.push(key("d"));
+    spans.push(desc(" data "));
+    spans.push(sep());
     spans.push(key("q"));
     spans.push(desc(" quit"));
     if let Some(warning) = &state.data_age_warning {
@@ -242,6 +262,20 @@ fn render_status_line(frame: &mut Frame, area: Rect, state: &AppState) {
             Style::default().fg(theme::YELLOW),
         ));
     }
+
+    // Ranges data always exists (the bundled snapshot, at worst), so this
+    // is shown unconditionally -- unlike GeoIP below, there's no "not
+    // configured" state to dim it for.
+    let ranges_text = state.ranges.status_text();
+    let ranges_color = if state.ranges.downloading {
+        theme::CYAN
+    } else if state.ranges.last_error.is_some() && state.ranges.data_as_of.is_none() {
+        theme::RED
+    } else if state.ranges.from_snapshot {
+        theme::YELLOW
+    } else {
+        theme::MUTED
+    };
 
     let geoip_text = state.geoip.status_text();
     let geoip_color = if state.geoip.downloading {
@@ -253,17 +287,25 @@ fn render_status_line(frame: &mut Frame, area: Rect, state: &AppState) {
     } else {
         theme::MUTED
     };
-    // Split off a fixed-width right column for the GeoIP hint rather than
-    // appending it to `spans`, so it stays pinned to the bottom-right
-    // corner regardless of how long the keybinding hints on the left are.
-    let right_width = geoip_text.chars().count() as u16 + 1;
+
+    // Split off a fixed-width right column for the data-freshness hints
+    // rather than appending them to `spans`, so they stay pinned to the
+    // bottom-right corner regardless of how long the keybinding hints on
+    // the left are.
+    let right_width =
+        ranges_text.chars().count() as u16 + 3 + geoip_text.chars().count() as u16 + 1;
     let columns = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Min(0), Constraint::Length(right_width)])
         .split(area);
     frame.render_widget(Line::from(spans), columns[0]);
     frame.render_widget(
-        Line::from(Span::styled(geoip_text, Style::default().fg(geoip_color))).right_aligned(),
+        Line::from(vec![
+            Span::styled(ranges_text, Style::default().fg(ranges_color)),
+            Span::raw("   "),
+            Span::styled(geoip_text, Style::default().fg(geoip_color)),
+        ])
+        .right_aligned(),
         columns[1],
     );
 }
@@ -311,6 +353,9 @@ fn select_alt_name_popup(area: Rect) -> Rect {
 }
 fn help_popup(area: Rect) -> Rect {
     centered_rect(56, 75, area)
+}
+fn data_info_popup(area: Rect) -> Rect {
+    centered_rect(80, 75, area)
 }
 
 fn render_prompt(frame: &mut Frame, area: Rect, buf: &str) {
@@ -728,6 +773,10 @@ fn render_help(frame: &mut Frame, area: Rect) {
         row("space", "Pause/resume the continuous ping (Ping/Trace)"),
         row("y", "Copy the current pane as text"),
         row("s", "Open the settings editor"),
+        row(
+            "d",
+            "Show what data was downloaded, when, and how big it is",
+        ),
         row("?", "Help overlay"),
         row("q", "Quit"),
         row(
@@ -736,6 +785,122 @@ fn render_help(frame: &mut Frame, area: Rect) {
         ),
     ];
     frame.render_widget(Paragraph::new(lines), inner);
+}
+
+/// What was downloaded, when, from where, and how big it is: every
+/// provider range-list file actually on disk plus the GeoLite2 editions,
+/// each resolved back to its source URL (see `Mode::DataInfo`'s doc
+/// comment for why this is a snapshot taken once at open time rather
+/// than rendered live).
+#[allow(clippy::too_many_arguments)]
+fn render_data_info(
+    frame: &mut Frame,
+    area: Rect,
+    state: &AppState,
+    geoip_cache_dir: Option<&std::path::Path>,
+    geoip_files: &[crate::geoip::CachedEdition],
+    ranges_cache_dir: Option<&std::path::Path>,
+    ranges_files: &[crate::providers::update::CachedRangeFile],
+    scroll: u16,
+) {
+    let popup = data_info_popup(area);
+    frame.render_widget(Clear, popup);
+    let block = theme::panel_with_hint(
+        "Data",
+        "d/esc/click to close · ↑/↓/PgUp/PgDn scroll",
+        theme::MUTED,
+        theme::PURPLE,
+    );
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    let section_title = |title: &str| {
+        Line::from(Span::styled(
+            title.to_string(),
+            Style::default()
+                .fg(theme::CYAN)
+                .add_modifier(Modifier::BOLD),
+        ))
+    };
+    let dim = |text: String| Line::from(Span::styled(text, Style::default().fg(theme::FAINT)));
+    let row =
+        |label: &str, size_bytes: u64, modified: Option<std::time::SystemTime>, source: &str| {
+            let age = modified
+                .map(|t| format!("{} ago", refresh::humanize_age(refresh::age_of(t))))
+                .unwrap_or_else(|| "-".to_string());
+            Line::from(vec![
+                Span::styled(format!("  {label:<22}"), Style::default().fg(theme::TEXT)),
+                Span::styled(
+                    format!("{:>10}  ", format_bytes(size_bytes)),
+                    Style::default().fg(theme::MUTED),
+                ),
+                Span::styled(format!("{age:>9}  "), Style::default().fg(theme::MUTED)),
+                Span::styled(source.to_string(), Style::default().fg(theme::FAINT)),
+            ])
+        };
+
+    let mut lines: Vec<Line> = vec![
+        section_title("Provider ranges (Hosting pane)"),
+        dim(match ranges_cache_dir {
+            Some(dir) => format!("cache: {}", dir.display()),
+            None => "cache: unavailable on this platform".to_string(),
+        }),
+        dim(state.ranges.status_text()),
+    ];
+    if ranges_files.is_empty() {
+        lines.push(dim(
+            "  nothing downloaded yet -- using the bundled snapshot".to_string(),
+        ));
+    } else {
+        for f in ranges_files {
+            lines.push(row(
+                &f.provider_name,
+                f.file.size_bytes,
+                f.file.modified,
+                &f.source_url,
+            ));
+        }
+    }
+
+    lines.push(Line::default());
+    lines.push(section_title("GeoIP (Geo pane)"));
+    lines.push(dim(match geoip_cache_dir {
+        Some(dir) => format!("cache: {}", dir.display()),
+        None => "cache: unavailable on this platform".to_string(),
+    }));
+    lines.push(dim(state.geoip.status_text()));
+    if geoip_files.is_empty() {
+        lines.push(dim("  not downloaded yet".to_string()));
+    } else {
+        for f in geoip_files {
+            lines.push(row(
+                f.edition_id,
+                f.file.size_bytes,
+                f.file.modified,
+                &f.source_url,
+            ));
+        }
+    }
+
+    frame.render_widget(Paragraph::new(lines).scroll((scroll, 0)), inner);
+}
+
+/// Renders a byte count in the coarsest unit that keeps one decimal of
+/// precision useful, e.g. "58.3 MiB", "512 B".
+fn format_bytes(bytes: u64) -> String {
+    const KIB: f64 = 1024.0;
+    const MIB: f64 = KIB * 1024.0;
+    const GIB: f64 = MIB * 1024.0;
+    let b = bytes as f64;
+    if b >= GIB {
+        format!("{:.1} GiB", b / GIB)
+    } else if b >= MIB {
+        format!("{:.1} MiB", b / MIB)
+    } else if b >= KIB {
+        format!("{:.1} KiB", b / KIB)
+    } else {
+        format!("{bytes} B")
+    }
 }
 
 /// Decodes a mouse event against whichever modal popup `mode` is
@@ -766,6 +931,12 @@ pub(crate) fn decode_popup_mouse(
         }
         Mode::Help => Some(match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => Action::InputCancel,
+            _ => Action::None,
+        }),
+        Mode::DataInfo { .. } => Some(match mouse.kind {
+            MouseEventKind::Down(MouseButton::Left) => Action::InputCancel,
+            MouseEventKind::ScrollUp => Action::ScrollUp,
+            MouseEventKind::ScrollDown => Action::ScrollDown,
             _ => Action::None,
         }),
         Mode::NewHostPrompt(_) => Some(outside_click_cancels(new_host_prompt_popup(area), mouse)),
@@ -937,6 +1108,7 @@ fn settings_click(
 mod tests {
     use std::collections::BTreeMap;
     use std::net::Ipv4Addr;
+    use std::path::PathBuf;
     use std::time::Duration;
 
     use ratatui::backend::TestBackend;
@@ -1371,6 +1543,26 @@ mod tests {
         );
     }
 
+    /// Ranges data always exists (the bundled snapshot, at worst), so its
+    /// status must appear on the status line even with nothing ever
+    /// downloaded -- unlike GeoIP just above, there's no "not configured"
+    /// state that hides it.
+    #[test]
+    fn ranges_status_always_appears_on_the_status_line() {
+        let mut state = AppState::new(Config::default(), ProviderDb::default());
+        state.tabs.push(empty_tab(1, "example.com"));
+
+        let backend = TestBackend::new(100, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| draw(frame, &state)).unwrap();
+
+        let content = buffer_to_string(terminal.backend().buffer());
+        assert!(
+            content.contains("Ranges: pending"),
+            "expected the default Ranges status on the status line: {content}"
+        );
+    }
+
     /// Once a check has a coordinate, the Geo pane must show the world
     /// map (see `worldmap::render_map`) with a pinpoint on it, not just
     /// the plain country/city table.
@@ -1405,7 +1597,12 @@ mod tests {
         state.tabs.push(populated_tab());
 
         let status_line_for = |state: &AppState| -> String {
-            let backend = TestBackend::new(160, 40);
+            // Wide enough that the left-side keybinding hints and the
+            // right-pinned data-freshness indicators (see
+            // `render_status_line`) never truncate into each other --
+            // this test is about which pane-specific hint shows, not
+            // about how much of either side fits at a given width.
+            let backend = TestBackend::new(220, 40);
             let mut terminal = Terminal::new(backend).unwrap();
             terminal.draw(|frame| draw(frame, state)).unwrap();
             buffer_to_string(terminal.backend().buffer())
@@ -1500,11 +1697,78 @@ mod tests {
                 editing: Some("in progress".to_string()),
                 message: Some("not a duration".to_string()),
             },
+            Mode::DataInfo {
+                geoip_cache_dir: Some(PathBuf::from("/tmp/geoip")),
+                geoip_files: vec![crate::geoip::CachedEdition {
+                    edition_id: crate::geoip::CITY_EDITION,
+                    source_url: "https://download.maxmind.com/geoip/databases/GeoLite2-City/download?suffix=tar.gz".to_string(),
+                    file: refresh::CachedFile {
+                        filename: "GeoLite2-City.mmdb".to_string(),
+                        size_bytes: 61_000_000,
+                        modified: Some(std::time::SystemTime::now() - Duration::from_secs(4 * 3600)),
+                    },
+                }],
+                ranges_cache_dir: Some(PathBuf::from("/tmp/ranges")),
+                ranges_files: vec![crate::providers::update::CachedRangeFile {
+                    provider_id: "cloudflare".to_string(),
+                    provider_name: "Cloudflare".to_string(),
+                    source_url: "https://www.cloudflare.com/ips-v4".to_string(),
+                    file: refresh::CachedFile {
+                        filename: "cloudflare-0.txt".to_string(),
+                        size_bytes: 1_200,
+                        modified: Some(std::time::SystemTime::now() - Duration::from_secs(2 * 3600)),
+                    },
+                }],
+                scroll: 0,
+            },
         ] {
             state.mode = mode;
             render_at(100, 30, |frame| draw(frame, &state));
             render_at(20, 6, |frame| draw(frame, &state));
         }
+    }
+
+    #[test]
+    fn data_info_popup_shows_provider_and_geoip_file_details() {
+        let mut state = AppState::new(Config::default(), ProviderDb::default());
+        state.mode = Mode::DataInfo {
+            geoip_cache_dir: Some(PathBuf::from("/tmp/geoip")),
+            geoip_files: vec![crate::geoip::CachedEdition {
+                edition_id: crate::geoip::ASN_EDITION,
+                source_url: "https://download.maxmind.com/geoip/databases/GeoLite2-ASN/download?suffix=tar.gz".to_string(),
+                file: refresh::CachedFile {
+                    filename: "GeoLite2-ASN.mmdb".to_string(),
+                    size_bytes: 7_000_000,
+                    modified: Some(std::time::SystemTime::now() - Duration::from_secs(3600)),
+                },
+            }],
+            ranges_cache_dir: Some(PathBuf::from("/tmp/ranges")),
+            ranges_files: vec![crate::providers::update::CachedRangeFile {
+                provider_id: "cloudflare".to_string(),
+                provider_name: "Cloudflare".to_string(),
+                source_url: "https://www.cloudflare.com/ips-v4".to_string(),
+                file: refresh::CachedFile {
+                    filename: "cloudflare-0.txt".to_string(),
+                    size_bytes: 1_200,
+                    modified: Some(std::time::SystemTime::now() - Duration::from_secs(7200)),
+                },
+            }],
+            scroll: 0,
+        };
+
+        let backend = TestBackend::new(120, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| draw(frame, &state)).unwrap();
+        let content = buffer_to_string(terminal.backend().buffer());
+
+        assert!(content.contains("Cloudflare"), "{content}");
+        assert!(
+            content.contains("https://www.cloudflare.com/ips-v4"),
+            "{content}"
+        );
+        assert!(content.contains(crate::geoip::ASN_EDITION), "{content}");
+        assert!(content.contains("/tmp/ranges"), "{content}");
+        assert!(content.contains("/tmp/geoip"), "{content}");
     }
 
     #[test]

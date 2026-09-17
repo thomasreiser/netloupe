@@ -78,10 +78,8 @@ async fn async_main(cli: Cli) -> anyhow::Result<()> {
 }
 
 fn cache_dir() -> anyhow::Result<PathBuf> {
-    let dirs = directories::ProjectDirs::from("", "", "netloupe").ok_or_else(|| {
-        anyhow::anyhow!("could not determine a cache directory for this platform")
-    })?;
-    Ok(dirs.cache_dir().join("ranges"))
+    netloupe::providers::update::cache_dir()
+        .ok_or_else(|| anyhow::anyhow!("could not determine a cache directory for this platform"))
 }
 
 async fn run_update_data(provider: Option<String>) -> anyhow::Result<()> {
