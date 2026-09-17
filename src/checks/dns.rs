@@ -25,6 +25,21 @@ use super::CheckContext;
 use crate::event::{CheckEvent, CheckUpdate};
 use crate::target::Target;
 
+/// One DNS record as the pane's table shows it: its type, rendered
+/// value, and the TTL (seconds) the server reported for it. Kept
+/// alongside (not instead of) `DnsResult`'s typed per-type fields
+/// (`a`, `aaaa`, `ns`, ...), which other checks and the headless JSON
+/// output consume without needing TTL. `ttl` is `None` for the one
+/// record type that doesn't carry one through here: PTR, since its
+/// lookup is shared with `checks::altnames`' one-off reverse queries
+/// via `lookup_ptr`, which returns plain names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DnsRecordRow {
+    pub record_type: &'static str,
+    pub value: String,
+    pub ttl: Option<u32>,
+}
+
 /// One MX record: preference plus the mail exchange hostname.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MxRecord {
@@ -64,6 +79,12 @@ pub struct DnsResult {
     pub srv: Vec<String>,
     /// Reverse-DNS names, populated when the target itself is an IP.
     pub ptr: Vec<String>,
+    /// Every A/AAAA/CNAME/MX/NS/TXT/CAA/SRV/PTR record above, alongside
+    /// its TTL, in fetch order -- what the DNS pane's table renders
+    /// directly, rather than re-deriving type/value/TTL from the typed
+    /// fields above (which stay as-is for the other checks and the
+    /// headless JSON output that consume them).
+    pub records: Vec<DnsRecordRow>,
     /// True if any answer in this run carried the DNS "Authenticated Data"
     /// flag. A hint that DNSSEC validation happened upstream, not proof: we
     /// don't walk the trust chain ourselves yet.
@@ -204,7 +225,17 @@ async fn resolve_ip(ip: IpAddr, opts: DnsOpts) -> DnsResult {
     };
 
     match lookup_ptr(ip, opts).await {
-        Ok(names) => result.ptr = names,
+        Ok(names) => {
+            result.records = names
+                .iter()
+                .map(|name| DnsRecordRow {
+                    record_type: "PTR",
+                    value: name.clone(),
+                    ttl: None,
+                })
+                .collect();
+            result.ptr = names;
+        }
         Err(err) => result.errors.push(format!("PTR: {err}")),
     }
     result
@@ -245,53 +276,70 @@ async fn fill_forward_records(resolver: &TokioResolver, name: &str, result: &mut
 
     match resolver.mx_lookup(name).await {
         Ok(lookup) => {
-            result.mx = lookup
-                .answers()
-                .iter()
-                .filter_map(|r| match &r.data {
-                    RData::MX(mx) => Some(MxRecord {
+            for r in lookup.answers() {
+                if let RData::MX(mx) = &r.data {
+                    let exchange = mx.exchange.to_string();
+                    result.mx.push(MxRecord {
                         preference: mx.preference,
-                        exchange: mx.exchange.to_string(),
-                    }),
-                    _ => None,
-                })
-                .collect();
+                        exchange: exchange.clone(),
+                    });
+                    result.records.push(DnsRecordRow {
+                        record_type: "MX",
+                        value: format!("{} {exchange}", mx.preference),
+                        ttl: Some(r.ttl),
+                    });
+                }
+            }
         }
         Err(err) => result.errors.push(format!("MX: {err}")),
     }
 
     match resolver.ns_lookup(name).await {
         Ok(lookup) => {
-            result.ns = lookup
-                .answers()
-                .iter()
-                .filter_map(|r| match &r.data {
-                    RData::NS(ns) => Some(ns.0.to_string()),
-                    _ => None,
-                })
-                .collect();
+            for r in lookup.answers() {
+                if let RData::NS(ns) = &r.data {
+                    let name = ns.0.to_string();
+                    result.ns.push(name.clone());
+                    result.records.push(DnsRecordRow {
+                        record_type: "NS",
+                        value: name,
+                        ttl: Some(r.ttl),
+                    });
+                }
+            }
         }
         Err(err) => result.errors.push(format!("NS: {err}")),
     }
 
     match resolver.txt_lookup(name).await {
         Ok(lookup) => {
-            result.txt = lookup
-                .answers()
-                .iter()
-                .filter_map(|r| match &r.data {
-                    RData::TXT(txt) => Some(txt_to_string(txt)),
-                    _ => None,
-                })
-                .collect();
+            for r in lookup.answers() {
+                if let RData::TXT(txt) = &r.data {
+                    let text = txt_to_string(txt);
+                    result.txt.push(text.clone());
+                    result.records.push(DnsRecordRow {
+                        record_type: "TXT",
+                        value: text,
+                        ttl: Some(r.ttl),
+                    });
+                }
+            }
         }
         Err(err) => result.errors.push(format!("TXT: {err}")),
     }
 
     match resolver.soa_lookup(name).await {
         Ok(lookup) => {
-            result.soa = lookup.answers().iter().find_map(|r| match &r.data {
-                RData::SOA(soa) => Some(SoaRecord {
+            if let Some((soa, ttl)) = lookup.answers().iter().find_map(|r| match &r.data {
+                RData::SOA(soa) => Some((soa, r.ttl)),
+                _ => None,
+            }) {
+                result.records.push(DnsRecordRow {
+                    record_type: "SOA",
+                    value: format!("{} {} serial={}", soa.mname, soa.rname, soa.serial),
+                    ttl: Some(ttl),
+                });
+                result.soa = Some(SoaRecord {
                     mname: soa.mname.to_string(),
                     rname: soa.rname.to_string(),
                     serial: soa.serial,
@@ -299,31 +347,38 @@ async fn fill_forward_records(resolver: &TokioResolver, name: &str, result: &mut
                     retry: soa.retry,
                     expire: soa.expire,
                     minimum: soa.minimum,
-                }),
-                _ => None,
-            });
+                });
+            }
         }
         Err(err) => result.errors.push(format!("SOA: {err}")),
     }
 
     match resolver.lookup(name, RecordType::CAA).await {
         Ok(lookup) => {
-            result.caa = lookup
-                .answers()
-                .iter()
-                .map(|r| r.data.to_string())
-                .collect()
+            for r in lookup.answers() {
+                let value = r.data.to_string();
+                result.caa.push(value.clone());
+                result.records.push(DnsRecordRow {
+                    record_type: "CAA",
+                    value,
+                    ttl: Some(r.ttl),
+                });
+            }
         }
         Err(err) => result.errors.push(format!("CAA: {err}")),
     }
 
     match resolver.srv_lookup(name).await {
         Ok(lookup) => {
-            result.srv = lookup
-                .answers()
-                .iter()
-                .map(|r| r.data.to_string())
-                .collect()
+            for r in lookup.answers() {
+                let value = r.data.to_string();
+                result.srv.push(value.clone());
+                result.records.push(DnsRecordRow {
+                    record_type: "SRV",
+                    value,
+                    ttl: Some(r.ttl),
+                });
+            }
         }
         Err(err) => result.errors.push(format!("SRV: {err}")),
     }
@@ -546,14 +601,34 @@ async fn do_axfr(zone: &str, ns_ip: IpAddr) -> Result<usize, String> {
 }
 
 fn classify_forward_record(record: &Record, result: &mut DnsResult) {
+    let ttl = record.ttl;
     match &record.data {
-        RData::A(a) => result.a.push(a.0),
-        RData::AAAA(aaaa) => result.aaaa.push(aaaa.0),
+        RData::A(a) => {
+            result.a.push(a.0);
+            result.records.push(DnsRecordRow {
+                record_type: "A",
+                value: a.0.to_string(),
+                ttl: Some(ttl),
+            });
+        }
+        RData::AAAA(aaaa) => {
+            result.aaaa.push(aaaa.0);
+            result.records.push(DnsRecordRow {
+                record_type: "AAAA",
+                value: aaaa.0.to_string(),
+                ttl: Some(ttl),
+            });
+        }
         RData::CNAME(cname) => {
             let name = cname.0.to_string();
             if !result.cnames.contains(&name) {
-                result.cnames.push(name);
+                result.cnames.push(name.clone());
             }
+            result.records.push(DnsRecordRow {
+                record_type: "CNAME",
+                value: name,
+                ttl: Some(ttl),
+            });
         }
         _ => {}
     }
@@ -845,5 +920,20 @@ mod tests {
 
         assert_eq!(result.a, vec![Ipv4Addr::new(93, 184, 216, 34)]);
         assert_eq!(result.cnames, vec!["edge.example.net.".to_string()]);
+        assert_eq!(
+            result.records,
+            vec![
+                DnsRecordRow {
+                    record_type: "A",
+                    value: "93.184.216.34".to_string(),
+                    ttl: Some(300),
+                },
+                DnsRecordRow {
+                    record_type: "CNAME",
+                    value: "edge.example.net.".to_string(),
+                    ttl: Some(300),
+                },
+            ]
+        );
     }
 }

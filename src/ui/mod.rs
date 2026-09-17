@@ -499,7 +499,10 @@ fn render_settings(
         .constraints([
             Constraint::Min(3),
             Constraint::Length(2),
-            Constraint::Length(if message.is_some() { 1 } else { 0 }),
+            // 2 rows rather than 1: a setter's rejection message (e.g.
+            // humantime's parse error) can run long enough to need a
+            // second wrapped line rather than being cut off mid-word.
+            Constraint::Length(if message.is_some() { 2 } else { 0 }),
         ])
         .split(inner);
 
@@ -508,6 +511,7 @@ fn render_settings(
         .iter()
         .enumerate()
         .map(|(i, field)| {
+            let is_editing = i == selected && editing.is_some();
             let value = if i == selected {
                 editing
                     .map(str::to_string)
@@ -515,8 +519,19 @@ fn render_settings(
             } else {
                 (field.get)(draft)
             };
-            let value = if value.is_empty() {
+            let value = if value.is_empty() && !is_editing {
                 "-".to_string()
+            } else {
+                value
+            };
+            // A blinking-caret-style cursor directly after the value
+            // being typed -- the row's own highlight color (below) also
+            // switches while editing, but this is what actually marks
+            // *where* keystrokes land, since the highlighted row alone
+            // looks identical whether it's merely selected or being
+            // actively typed into.
+            let value = if is_editing {
+                format!("{value}▏")
             } else {
                 value
             };
@@ -531,14 +546,24 @@ fn render_settings(
             ]))
         })
         .collect();
+    // Editing a field gets a distinct highlight color from merely having
+    // it selected (cyan, the same "selected row" language used
+    // elsewhere in this app), so the one row you're actively typing
+    // into is unmistakable at a glance rather than looking identical to
+    // ordinary ↑/↓ navigation.
+    let highlight_bg = if editing.is_some() {
+        theme::YELLOW
+    } else {
+        theme::CYAN
+    };
     let list = ratatui::widgets::List::new(items)
         .highlight_style(
             Style::default()
                 .fg(Color::Rgb(18, 18, 24))
-                .bg(theme::CYAN)
+                .bg(highlight_bg)
                 .add_modifier(Modifier::BOLD),
         )
-        .highlight_symbol("❯ ");
+        .highlight_symbol(if editing.is_some() { "✎ " } else { "❯ " });
     let mut list_state = ratatui::widgets::ListState::default().with_selected(Some(selected));
     frame.render_stateful_widget(list, chunks[0], &mut list_state);
 
@@ -563,7 +588,8 @@ fn render_settings(
             Paragraph::new(Line::from(Span::styled(
                 message,
                 Style::default().fg(color),
-            ))),
+            )))
+            .wrap(Wrap { trim: true }),
             chunks[2],
         );
     }
@@ -1159,6 +1185,16 @@ mod tests {
         dns.a.push(Ipv4Addr::new(93, 184, 216, 34));
         dns.ns.push("a.iana-servers.net.".into());
         dns.authenticated_data = true;
+        dns.records.push(crate::checks::dns::DnsRecordRow {
+            record_type: "A",
+            value: "93.184.216.34".to_string(),
+            ttl: Some(3600),
+        });
+        dns.records.push(crate::checks::dns::DnsRecordRow {
+            record_type: "NS",
+            value: "a.iana-servers.net.".to_string(),
+            ttl: Some(86400),
+        });
         tab.checks.insert(
             CheckId::Dns,
             CheckSlot {
@@ -1392,6 +1428,41 @@ mod tests {
         );
     }
 
+    /// Each row of Overview's cards is sized to its tallest card's
+    /// actual content (plus border), not a fixed 50% of the pane --
+    /// otherwise a card with only 1-2 lines of content balloons into a
+    /// mostly empty box on a tall terminal. Alternative Hostnames
+    /// should get whatever's left over instead.
+    #[test]
+    fn overview_cards_stay_compact_on_a_tall_terminal() {
+        let mut state = AppState::new(Config::default(), ProviderDb::default());
+        state.tabs.push(populated_tab());
+
+        let backend = TestBackend::new(120, 80);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| draw(frame, &state)).unwrap();
+        let content = buffer_to_string(terminal.backend().buffer());
+
+        // The TARGET card has 2 real content lines (Host, IPs); its
+        // bottom border should be only a few rows below that, not
+        // dozens of rows down from a 50%-of-80-row split.
+        let ips_row = content
+            .lines()
+            .position(|l| l.contains("IPs") && l.contains("93.184.216.34"))
+            .expect("expected the TARGET card's IPs row");
+        let card_bottom_border = content
+            .lines()
+            .skip(ips_row)
+            .position(|l| l.contains('╰'))
+            .map(|offset| ips_row + offset)
+            .expect("expected the TARGET card's bottom border");
+        assert!(
+            card_bottom_border - ips_row <= 4,
+            "the TARGET card should be sized to its content, not balloon on a tall terminal \
+             (IPs row {ips_row}, bottom border {card_bottom_border}): {content}"
+        );
+    }
+
     /// `Config::show_country_flags` gates a flag emoji next to a
     /// country everywhere one's shown -- off by default, on once set,
     /// in both the Overview dashboard's Country card and the Geo pane's
@@ -1421,6 +1492,269 @@ mod tests {
         assert!(
             content.contains("🇺🇸"),
             "expected the US flag next to the country once enabled: {content}"
+        );
+    }
+
+    /// The DNS pane's main record table shows TYPE/VALUE/TTL columns
+    /// with a header, and nameservers get their own dedicated section
+    /// (with their own TTL column) rather than being mixed into the
+    /// main table a second time.
+    #[test]
+    fn dns_pane_splits_nameservers_into_their_own_section_with_ttl() {
+        let mut state = AppState::new(Config::default(), ProviderDb::default());
+        let mut tab = empty_tab(1, "example.com");
+        tab.active_pane = Pane::ALL.iter().position(|&p| p == Pane::Dns).unwrap();
+        tab.checks.insert(
+            CheckId::Dns,
+            CheckSlot {
+                status: CheckStatus::Done,
+                update: Some(CheckUpdate::Dns(crate::checks::dns::DnsResult {
+                    resolver: "system".to_string(),
+                    records: vec![
+                        crate::checks::dns::DnsRecordRow {
+                            record_type: "A",
+                            value: "93.184.216.34".to_string(),
+                            ttl: Some(3600),
+                        },
+                        crate::checks::dns::DnsRecordRow {
+                            record_type: "NS",
+                            value: "a.iana-servers.net.".to_string(),
+                            ttl: Some(86400),
+                        },
+                        crate::checks::dns::DnsRecordRow {
+                            record_type: "NS",
+                            value: "b.iana-servers.net.".to_string(),
+                            ttl: Some(86400),
+                        },
+                    ],
+                    ..Default::default()
+                })),
+            },
+        );
+        state.tabs.push(tab);
+
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| draw(frame, &state)).unwrap();
+        let content = buffer_to_string(terminal.backend().buffer());
+
+        assert!(
+            content.contains("TYPE"),
+            "main table needs a header: {content}"
+        );
+        assert!(content.contains("TTL"), "expected a TTL column: {content}");
+        assert!(
+            content.contains("3600s"),
+            "expected the A record's TTL: {content}"
+        );
+        assert!(
+            content.contains("Nameservers"),
+            "expected a dedicated Nameservers section: {content}"
+        );
+        assert!(content.contains("a.iana-servers.net."));
+        assert!(content.contains("b.iana-servers.net."));
+        assert!(
+            content.contains("86400s"),
+            "expected the nameservers' TTL: {content}"
+        );
+
+        // The main table's own TYPE column shouldn't repeat "NS" -- it's
+        // only shown in the Nameservers section.
+        let main_table_region = content
+            .lines()
+            .take_while(|l| !l.contains("Nameservers"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !main_table_region.contains("a.iana-servers.net."),
+            "nameservers shouldn't also appear in the main table: {main_table_region}"
+        );
+    }
+
+    /// On a modest (not huge) terminal, a domain with plenty of records
+    /// and several nameservers must still show the main table's header
+    /// (and TTL column) -- the height budgeted for the main table has
+    /// to account for the Nameservers section, the Discovery panel, and
+    /// any errors, or ratatui's layout solver ends up shrinking the
+    /// table itself (and its header) to make the rest fit.
+    #[test]
+    fn dns_pane_shows_the_ttl_header_with_many_records_on_a_modest_terminal() {
+        let mut state = AppState::new(Config::default(), ProviderDb::default());
+        let mut tab = empty_tab(1, "example.com");
+        tab.active_pane = Pane::ALL.iter().position(|&p| p == Pane::Dns).unwrap();
+
+        let mut records = vec![
+            crate::checks::dns::DnsRecordRow {
+                record_type: "A",
+                value: "93.184.216.34".to_string(),
+                ttl: Some(3600),
+            },
+            crate::checks::dns::DnsRecordRow {
+                record_type: "AAAA",
+                value: "2606:2800:220:1:248:1893:25c8:1946".to_string(),
+                ttl: Some(3600),
+            },
+            crate::checks::dns::DnsRecordRow {
+                record_type: "MX",
+                value: "10 mail.example.com.".to_string(),
+                ttl: Some(3600),
+            },
+            crate::checks::dns::DnsRecordRow {
+                record_type: "TXT",
+                value: "v=spf1 include:_spf.example.com ~all".to_string(),
+                ttl: Some(3600),
+            },
+            crate::checks::dns::DnsRecordRow {
+                record_type: "CAA",
+                value: "0 issue \"letsencrypt.org\"".to_string(),
+                ttl: Some(3600),
+            },
+        ];
+        for n in 1..=4 {
+            records.push(crate::checks::dns::DnsRecordRow {
+                record_type: "NS",
+                value: format!("ns{n}.example.com."),
+                ttl: Some(86400),
+            });
+        }
+
+        tab.checks.insert(
+            CheckId::Dns,
+            CheckSlot {
+                status: CheckStatus::Done,
+                update: Some(CheckUpdate::Dns(crate::checks::dns::DnsResult {
+                    resolver: "system".to_string(),
+                    records,
+                    errors: vec!["SRV: no records found".to_string()],
+                    ..Default::default()
+                })),
+            },
+        );
+        state.tabs.push(tab);
+
+        // A common default size, not an especially tall one.
+        let backend = TestBackend::new(100, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| draw(frame, &state)).unwrap();
+        let content = buffer_to_string(terminal.backend().buffer());
+
+        assert!(
+            content.contains("TYPE") && content.contains("VALUE") && content.contains("TTL"),
+            "the main table's header must survive at a modest terminal size: {content}"
+        );
+        assert!(
+            content.contains("3600s"),
+            "expected at least one record's TTL to be visible: {content}"
+        );
+    }
+
+    /// On a wide terminal, the value column's `Constraint::Fill(1)`
+    /// would otherwise stretch to the pane's full width, stranding the
+    /// TTL column far to the right of the record it describes -- behind
+    /// a gap wide enough to scroll past without noticing there's a
+    /// third column at all. Both the main table and the Nameservers
+    /// section cap their own width so TTL stays adjacent to the
+    /// content regardless of how wide the terminal is.
+    #[test]
+    fn ttl_column_stays_close_to_the_content_on_a_wide_terminal() {
+        let mut state = AppState::new(Config::default(), ProviderDb::default());
+        let mut tab = empty_tab(1, "example.com");
+        tab.active_pane = Pane::ALL.iter().position(|&p| p == Pane::Dns).unwrap();
+        tab.checks.insert(
+            CheckId::Dns,
+            CheckSlot {
+                status: CheckStatus::Done,
+                update: Some(CheckUpdate::Dns(crate::checks::dns::DnsResult {
+                    resolver: "system".to_string(),
+                    records: vec![
+                        crate::checks::dns::DnsRecordRow {
+                            record_type: "A",
+                            value: "93.184.216.34".to_string(),
+                            ttl: Some(3600),
+                        },
+                        crate::checks::dns::DnsRecordRow {
+                            record_type: "NS",
+                            value: "ns1.example.com.".to_string(),
+                            ttl: Some(86400),
+                        },
+                    ],
+                    ..Default::default()
+                })),
+            },
+        );
+        state.tabs.push(tab);
+
+        let backend = TestBackend::new(220, 50);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| draw(frame, &state)).unwrap();
+        let buffer = terminal.backend().buffer();
+
+        let find_col = |row: u16, needle: &str| -> u16 {
+            let text: String = (0..buffer.area.width)
+                .map(|x| buffer.cell((x, row)).unwrap().symbol())
+                .collect();
+            text.find(needle)
+                .unwrap_or_else(|| panic!("{needle:?} not found on row {row}: {text:?}"))
+                as u16
+        };
+        let main_table_row = (0..buffer.area.height)
+            .find(|&y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer.cell((x, y)).unwrap().symbol())
+                    .collect::<String>()
+                    .contains("93.184.216.34")
+            })
+            .expect("the A record's row must be on screen");
+        let value_col = find_col(main_table_row, "93.184.216.34");
+        let ttl_col = find_col(main_table_row, "3600s");
+        assert!(
+            ttl_col - value_col < 100,
+            "TTL (col {ttl_col}) should stay reasonably close to the value (col {value_col}) even on a 220-column terminal"
+        );
+    }
+
+    /// A zone walk that fails immediately (e.g. it can't actually enter
+    /// the NSEC chain) must surface why, rather than looking identical
+    /// to one that simply hasn't found any names yet.
+    #[test]
+    fn dns_pane_shows_zone_walk_errors() {
+        let mut state = AppState::new(Config::default(), ProviderDb::default());
+        let mut tab = empty_tab(1, "example.com");
+        tab.active_pane = Pane::ALL.iter().position(|&p| p == Pane::Dns).unwrap();
+        tab.checks.insert(
+            CheckId::Dns,
+            CheckSlot {
+                status: CheckStatus::Done,
+                update: Some(CheckUpdate::Dns(crate::checks::dns::DnsResult {
+                    zone_signing: crate::checks::dns::ZoneSigning::Nsec,
+                    ..Default::default()
+                })),
+            },
+        );
+        tab.checks.insert(
+            CheckId::ZoneWalk,
+            CheckSlot {
+                status: CheckStatus::Done,
+                update: Some(CheckUpdate::ZoneWalk(
+                    crate::checks::zonewalk::ZoneWalkResult {
+                        zone: "example.com".to_string(),
+                        names: Vec::new(),
+                        queries_made: 1,
+                        complete: false,
+                        errors: vec!["could not enter the NSEC chain".to_string()],
+                    },
+                )),
+            },
+        );
+        state.tabs.push(tab);
+
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| draw(frame, &state)).unwrap();
+        let content = buffer_to_string(terminal.backend().buffer());
+        assert!(
+            content.contains("could not enter the NSEC chain"),
+            "expected the zone walk's error to be visible: {content}"
         );
     }
 
@@ -1562,6 +1896,107 @@ mod tests {
             "expected the default Ranges status on the status line: {content}"
         );
     }
+
+    /// The resolver shows above the record table as its own line,
+    /// rather than as a synthetic first row inside it.
+    #[test]
+    fn dns_pane_shows_the_resolver_above_the_table() {
+        let mut state = AppState::new(Config::default(), ProviderDb::default());
+        state.tabs.push(populated_tab());
+        state.tabs[0].active_pane = Pane::ALL.iter().position(|&p| p == Pane::Dns).unwrap();
+        let backend = TestBackend::new(100, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| draw(frame, &state)).unwrap();
+        let content = buffer_to_string(terminal.backend().buffer());
+
+        let resolver_row = content
+            .lines()
+            .position(|l| l.contains("Resolver") && l.contains("system default"))
+            .expect("expected a resolver line");
+        let header_row = content
+            .lines()
+            .position(|l| l.contains("TYPE") && l.contains("VALUE") && l.contains("TTL"))
+            .expect("expected the table's header row");
+        assert!(
+            resolver_row < header_row,
+            "the resolver line should be above the table, not inside it: {content}"
+        );
+
+        let table_region = content
+            .lines()
+            .skip(header_row)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !table_region.contains("Resolver"),
+            "the resolver shouldn't also appear as a row inside the table: {table_region}"
+        );
+    }
+
+    /// `panes::header_and_body` puts a blank row between the status
+    /// header (check badges) and the pane's own content -- every pane
+    /// goes through it, so proving this once here covers all of them,
+    /// rather than one pane at a time.
+    #[test]
+    fn a_blank_row_separates_the_status_header_from_the_panes_content() {
+        let mut state = AppState::new(Config::default(), ProviderDb::default());
+        state.tabs.push(populated_tab());
+        state.tabs[0].active_pane = Pane::ALL.iter().position(|&p| p == Pane::Geo).unwrap();
+
+        let backend = TestBackend::new(100, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| draw(frame, &state)).unwrap();
+        let content = buffer_to_string(terminal.backend().buffer());
+
+        let header_row = content
+            .lines()
+            .position(|l| l.contains("● Geo"))
+            .expect("expected the status header's check badge");
+        let next_line = content
+            .lines()
+            .nth(header_row + 1)
+            .expect("expected a line after the status header");
+        assert!(
+            !next_line.chars().any(char::is_alphanumeric),
+            "expected a blank row (just borders/whitespace, no content) between the status header and the pane's content: {next_line:?}"
+        );
+    }
+
+    /// `panes::header_and_body` pads the pane's content 1 column in
+    /// from its left/right border (`Rect::inner(Margin::new(1, 0))`),
+    /// so content never sits flush against the border the way a blank
+    /// row already separates it from the status header above.
+    #[test]
+    fn a_blank_column_separates_the_panes_border_from_its_content() {
+        let mut state = AppState::new(Config::default(), ProviderDb::default());
+        state.tabs.push(populated_tab());
+        state.tabs[0].active_pane = Pane::ALL.iter().position(|&p| p == Pane::Geo).unwrap();
+
+        let backend = TestBackend::new(100, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| draw(frame, &state)).unwrap();
+        let content = buffer_to_string(terminal.backend().buffer());
+
+        let header_line = content
+            .lines()
+            .find(|l| l.contains("● Geo"))
+            .expect("expected the status header's check badge");
+        let chars: Vec<char> = header_line.chars().collect();
+        let badge_col = chars
+            .iter()
+            .position(|&c| c == '●')
+            .expect("expected the check badge glyph");
+        assert_eq!(
+            chars[badge_col - 1], ' ',
+            "expected a blank column of padding directly before the pane's content: {header_line:?}"
+        );
+        assert_eq!(
+            chars[badge_col - 2],
+            '│',
+            "expected the pane's own border right before that padding column: {header_line:?}"
+        );
+    }
+
 
     /// Once a check has a coordinate, the Geo pane must show the world
     /// map (see `worldmap::render_map`) with a pinpoint on it, not just
@@ -1961,6 +2396,56 @@ mod tests {
         assert_eq!(
             select_alt_name_click(area, 5, 0, left_click(0, 0)),
             Action::InputCancel
+        );
+    }
+
+    /// Actively editing a field must look visibly different from merely
+    /// having it selected -- a cursor right after the in-progress value,
+    /// and a distinct (yellow, not cyan) row highlight -- since both
+    /// states otherwise render identically apart from a faint cursor
+    /// buried in the help line below.
+    #[test]
+    fn settings_editing_a_field_is_visually_distinct_from_just_selecting_it() {
+        let backend = TestBackend::new(100, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        let mut selected_only = AppState::new(Config::default(), ProviderDb::default());
+        selected_only.mode = Mode::Settings {
+            draft: Box::new(Config::default()),
+            selected: 0,
+            editing: None,
+            message: None,
+        };
+        terminal.draw(|frame| draw(frame, &selected_only)).unwrap();
+        let not_editing = buffer_to_string(terminal.backend().buffer());
+        assert!(
+            !not_editing.contains('▏'),
+            "no cursor should appear on a merely-selected row"
+        );
+
+        let mut editing = AppState::new(Config::default(), ProviderDb::default());
+        editing.mode = Mode::Settings {
+            draft: Box::new(Config::default()),
+            selected: 0,
+            editing: Some("1.1.1.1".to_string()),
+            message: None,
+        };
+        terminal.draw(|frame| draw(frame, &editing)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let content = buffer_to_string(buffer);
+        assert!(
+            content.contains("1.1.1.1▏"),
+            "expected a cursor directly after the in-progress value: {content}"
+        );
+
+        let row = (0..buffer.area.height)
+            .find(|&y| (0..buffer.area.width).any(|x| buffer.cell((x, y)).unwrap().symbol() == "▏"))
+            .expect("the cursor glyph must be on screen somewhere");
+        let has_yellow_bg =
+            (0..buffer.area.width).any(|x| buffer.cell((x, row)).unwrap().bg == theme::YELLOW);
+        assert!(
+            has_yellow_bg,
+            "the actively-edited row should be highlighted yellow, not the normal selection cyan"
         );
     }
 

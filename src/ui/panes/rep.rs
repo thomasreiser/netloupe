@@ -58,6 +58,7 @@ pub fn render(frame: &mut Frame, area: Rect, tab: &TabState) {
             Constraint::Min(0),
             Constraint::Length(rep.errors.len().min(4) as u16),
         ])
+        .spacing(1)
         .split(body);
     crate::ui::widgets::kv_table::render(frame, chunks[0], &rows, tab.scroll);
     if !rep.errors.is_empty() {
