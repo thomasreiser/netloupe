@@ -119,7 +119,14 @@ pub fn draw(frame: &mut Frame, state: &AppState) {
 /// span gets a subtle underline marking it as clickable, and whichever
 /// one has keyboard focus (`Action::FocusNextLink`/`FocusPrevLink`) gets
 /// a solid highlight instead, the same visual language as a selected
-/// list row elsewhere in this app (e.g. `theme::pill`).
+/// list row elsewhere in this app (e.g. `theme::pill`). Applied with
+/// `Buffer::set_style` rather than `render_widget`-ing the span's own
+/// cached text: a stale span (content shifted since it was found, e.g. a
+/// streaming check adding a line) then only mis-styles whatever's
+/// actually there for one frame instead of overwriting it with old
+/// text -- which would otherwise make the *next* frame's rescan find
+/// that same old text again, since it would just have repainted it, and
+/// the overlay would never self-correct.
 fn render_clickable_links(frame: &mut Frame, state: &AppState) {
     let focused = state.active().and_then(|t| t.focused_link);
     for (i, span) in state.clickable_spans.iter().enumerate() {
@@ -139,7 +146,9 @@ fn render_clickable_links(frame: &mut Frame, state: &AppState) {
             span.col_end.saturating_sub(span.col_start),
             1,
         );
-        frame.render_widget(Span::styled(span.text.clone(), style), rect);
+        // `Buffer::set_style` clips to the buffer's own area itself, so
+        // a stale span pointing past a since-shrunk terminal is safe.
+        frame.buffer_mut().set_style(rect, style);
     }
 }
 
@@ -1248,6 +1257,51 @@ mod tests {
             other_cell.bg,
             theme::CYAN,
             "only the focused link gets the solid highlight"
+        );
+    }
+
+    /// A stale span (same screen position as a real one, but leftover
+    /// text from a frame the current content no longer matches -- e.g. a
+    /// streaming check added a line since `AppState::clickable_spans`
+    /// was last rescanned) must only restyle whatever's actually at
+    /// those coordinates, never overwrite it with its own cached text.
+    /// Doing the latter would make the *next* rescan find that same
+    /// stale text again (since the overlay would just have repainted
+    /// it), corrupting the frame indefinitely instead of self-correcting
+    /// within a frame the way the one-frame lag is supposed to.
+    #[test]
+    fn a_stale_clickable_span_restyles_without_overwriting_the_real_text() {
+        let mut state = AppState::new(Config::default(), ProviderDb::default());
+        state.tabs.push(populated_tab());
+
+        let terminal_area = Rect::new(0, 0, 120, 40);
+        let area = body_area(terminal_area);
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let real_spans = {
+            let completed = terminal.draw(|frame| draw(frame, &state)).unwrap();
+            crate::ui::linkscan::scan(completed.buffer, area)
+        };
+        let real = real_spans
+            .first()
+            .expect("the populated Overview pane has at least one clickable span");
+
+        state.clickable_spans = vec![crate::ui::linkscan::ClickableSpan {
+            row: real.row,
+            col_start: real.col_start,
+            col_end: real.col_end,
+            text: "totally-different-stale.example".to_string(),
+            target: Target::parse("totally-different-stale.example").unwrap(),
+        }];
+        terminal.draw(|frame| draw(frame, &state)).unwrap();
+        let buffer = terminal.backend().buffer();
+
+        let rendered: String = (real.col_start..real.col_end)
+            .map(|col| buffer.cell((col, real.row)).unwrap().symbol())
+            .collect();
+        assert_eq!(
+            rendered, real.text,
+            "a stale span must only restyle the real content, never overwrite its text"
         );
     }
 
