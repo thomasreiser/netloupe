@@ -454,7 +454,10 @@ fn render_settings(
         .constraints([
             Constraint::Min(3),
             Constraint::Length(2),
-            Constraint::Length(if message.is_some() { 1 } else { 0 }),
+            // 2 rows rather than 1: a setter's rejection message (e.g.
+            // humantime's parse error) can run long enough to need a
+            // second wrapped line rather than being cut off mid-word.
+            Constraint::Length(if message.is_some() { 2 } else { 0 }),
         ])
         .split(inner);
 
@@ -540,7 +543,8 @@ fn render_settings(
             Paragraph::new(Line::from(Span::styled(
                 message,
                 Style::default().fg(color),
-            ))),
+            )))
+            .wrap(Wrap { trim: true }),
             chunks[2],
         );
     }

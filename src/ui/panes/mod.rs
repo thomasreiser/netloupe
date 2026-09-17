@@ -22,7 +22,7 @@ mod tls;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::Paragraph;
+use ratatui::widgets::{Paragraph, Wrap};
 use ratatui::Frame;
 
 use super::theme;
@@ -119,7 +119,7 @@ pub(super) fn errors_widget(errors: &[String]) -> Paragraph<'static> {
             ))
         })
         .collect();
-    Paragraph::new(lines)
+    Paragraph::new(lines).wrap(Wrap { trim: false })
 }
 
 /// True if a check hasn't reported anything yet (vs. having failed, or
@@ -155,5 +155,37 @@ mod tests {
     #[test]
     fn clamp_scroll_never_goes_negative_when_content_is_shorter_than_the_viewport() {
         assert_eq!(clamp_scroll(5, 3, 10), 0);
+    }
+
+    /// A long error message must wrap onto additional lines rather than
+    /// being cut off at the pane's edge -- this is the one shared
+    /// helper every pane's error display goes through, so it only needs
+    /// proving here.
+    #[test]
+    fn errors_widget_wraps_a_long_message_onto_multiple_lines() {
+        use ratatui::backend::TestBackend;
+        use ratatui::layout::Rect;
+        use ratatui::Terminal;
+
+        let long = "could not enter the NSEC chain (the zone may not actually use NSEC, or the probe query failed)".to_string();
+        let widget = errors_widget(std::slice::from_ref(&long));
+
+        let backend = TestBackend::new(30, 5);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| frame.render_widget(widget, Rect::new(0, 0, 30, 5)))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+
+        let row0: String = (0..30)
+            .map(|x| buffer.cell((x, 0)).unwrap().symbol())
+            .collect();
+        let row1: String = (0..30)
+            .map(|x| buffer.cell((x, 1)).unwrap().symbol())
+            .collect();
+        assert!(
+            !row1.trim().is_empty(),
+            "expected the message to spill onto a second row instead of being clipped: {row0:?}"
+        );
     }
 }
