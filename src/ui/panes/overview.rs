@@ -38,15 +38,21 @@ pub fn render(frame: &mut Frame, area: Rect, tab: &TabState, show_country_flags:
         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
         .spacing(1)
         .split(sections[0]);
+    // A terminal character cell is roughly twice as tall as it is wide,
+    // so a 1-row vertical gap (see `rows` above) reads as visually
+    // larger than a 1-column horizontal one even though both are "1
+    // cell" -- widening the horizontal gap to 2 columns balances the
+    // two so neither axis looks more spaced out than the other.
+    const CARD_SPACING: u16 = 2;
     let top = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Ratio(1, 3); 3])
-        .spacing(1)
+        .spacing(CARD_SPACING)
         .split(rows[0]);
     let bottom = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Ratio(1, 3); 3])
-        .spacing(1)
+        .spacing(CARD_SPACING)
         .split(rows[1]);
 
     render_alt_names(frame, sections[1], tab);
