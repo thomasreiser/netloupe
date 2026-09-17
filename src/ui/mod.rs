@@ -1274,6 +1274,51 @@ mod tests {
         );
     }
 
+    /// A zone walk that fails immediately (e.g. it can't actually enter
+    /// the NSEC chain) must surface why, rather than looking identical
+    /// to one that simply hasn't found any names yet.
+    #[test]
+    fn dns_pane_shows_zone_walk_errors() {
+        let mut state = AppState::new(Config::default(), ProviderDb::default());
+        let mut tab = empty_tab(1, "example.com");
+        tab.active_pane = Pane::ALL.iter().position(|&p| p == Pane::Dns).unwrap();
+        tab.checks.insert(
+            CheckId::Dns,
+            CheckSlot {
+                status: CheckStatus::Done,
+                update: Some(CheckUpdate::Dns(crate::checks::dns::DnsResult {
+                    zone_signing: crate::checks::dns::ZoneSigning::Nsec,
+                    ..Default::default()
+                })),
+            },
+        );
+        tab.checks.insert(
+            CheckId::ZoneWalk,
+            CheckSlot {
+                status: CheckStatus::Done,
+                update: Some(CheckUpdate::ZoneWalk(
+                    crate::checks::zonewalk::ZoneWalkResult {
+                        zone: "example.com".to_string(),
+                        names: Vec::new(),
+                        queries_made: 1,
+                        complete: false,
+                        errors: vec!["could not enter the NSEC chain".to_string()],
+                    },
+                )),
+            },
+        );
+        state.tabs.push(tab);
+
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| draw(frame, &state)).unwrap();
+        let content = buffer_to_string(terminal.backend().buffer());
+        assert!(
+            content.contains("could not enter the NSEC chain"),
+            "expected the zone walk's error to be visible: {content}"
+        );
+    }
+
     /// A hostname/IP `ui::linkscan` finds must render underlined, and
     /// whichever one has keyboard focus (`TabState::focused_link`) must
     /// render highlighted instead -- the two-tier visual language

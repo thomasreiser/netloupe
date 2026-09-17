@@ -256,6 +256,16 @@ fn render_discovery(
                     Style::default().fg(theme::MUTED),
                 )));
             }
+            // Otherwise a walk that fails immediately (e.g. the zone
+            // doesn't actually enter the NSEC chain the way the DNSSEC
+            // probe that gated `w` suggested it would) looks identical
+            // to one that simply hasn't found anything yet.
+            for error in &walk.errors {
+                lines.push(Line::from(Span::styled(
+                    format!("  ⚠ {error}"),
+                    Style::default().fg(theme::RED),
+                )));
+            }
         }
         None if zone_walk_slot.status == crate::app::CheckStatus::Running => {
             lines.push(Line::from(vec![
