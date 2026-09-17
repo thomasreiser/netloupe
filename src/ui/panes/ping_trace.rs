@@ -128,7 +128,7 @@ fn render_sparkline(frame: &mut Frame, area: Rect, tab: &TabState) {
     }
     let title = if ping.paused { "RTT (paused)" } else { "RTT" };
     let block = theme::panel(title, theme::pane_accent(crate::app::Pane::PingTrace));
-    let inner = block.inner(area);
+    let inner = block.inner(area).inner(ratatui::layout::Margin::new(1, 0));
     frame.render_widget(block, area);
     frame.render_widget(
         crate::ui::widgets::sparkline::widget(&ping.samples, inner.width),
