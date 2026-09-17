@@ -42,15 +42,7 @@ pub fn render(frame: &mut Frame, area: Rect, tab: &TabState) {
 
     // Nameservers get their own section below, so they're excluded here
     // rather than shown twice.
-    let mut record_rows: Vec<RecordRow> = vec![RecordRow {
-        record_type: "Resolver".to_string(),
-        value: if dns.resolver == "system" {
-            "system default".to_string()
-        } else {
-            dns.resolver.clone()
-        },
-        ttl: "-".to_string(),
-    }];
+    let mut record_rows: Vec<RecordRow> = Vec::new();
     for record in dns.records.iter().filter(|r| r.record_type != "NS") {
         record_rows.push(RecordRow {
             record_type: record.record_type.to_string(),
@@ -86,20 +78,21 @@ pub fn render(frame: &mut Frame, area: Rect, tab: &TabState) {
     };
     let errors_height = dns.errors.len().min(4) as u16;
     // Reserves room for everything else the layout below needs (the
-    // Nameservers section, the Discovery panel's own `Min(3)`, and any
-    // errors) before capping the main table's height -- otherwise, on a
-    // short terminal, the total requested height could exceed what's
-    // actually available and ratatui's layout solver would shrink the
-    // table itself to make room, potentially squeezing its header (and
-    // the TTL column with it) out entirely rather than just leaving
-    // fewer Discovery rows visible.
-    let reserved_for_others = ns_height + 3 + errors_height;
+    // resolver line, the Nameservers section, the Discovery panel's own
+    // `Min(3)`, and any errors) before capping the main table's height
+    // -- otherwise, on a short terminal, the total requested height
+    // could exceed what's actually available and ratatui's layout
+    // solver would shrink the table itself to make room, potentially
+    // squeezing its header (and the TTL column with it) out entirely
+    // rather than just leaving fewer Discovery rows visible.
+    let reserved_for_others = 1 + ns_height + 3 + errors_height;
     let table_height = (record_rows.len() as u16 + 1)
         .min(MAX_TABLE_ROWS_SHOWN)
         .min(area.height.saturating_sub(reserved_for_others));
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
+            Constraint::Length(1),
             Constraint::Length(table_height),
             Constraint::Length(ns_height),
             Constraint::Min(3),
@@ -107,13 +100,26 @@ pub fn render(frame: &mut Frame, area: Rect, tab: &TabState) {
         ])
         .split(body);
 
-    crate::ui::widgets::record_table::render(frame, chunks[0], &record_rows, tab.scroll);
+    let resolver_text = if dns.resolver == "system" {
+        "system default".to_string()
+    } else {
+        dns.resolver.clone()
+    };
+    frame.render_widget(
+        Line::from(vec![
+            label("Resolver"),
+            Span::styled(resolver_text, Style::default().fg(theme::TEXT)),
+        ]),
+        chunks[0],
+    );
+
+    crate::ui::widgets::record_table::render(frame, chunks[1], &record_rows, tab.scroll);
     if !ns_rows.is_empty() {
-        render_nameservers(frame, chunks[1], &ns_rows);
+        render_nameservers(frame, chunks[2], &ns_rows);
     }
-    render_discovery(frame, chunks[2], tab, dns);
+    render_discovery(frame, chunks[3], tab, dns);
     if !dns.errors.is_empty() {
-        frame.render_widget(errors_widget(&dns.errors), chunks[3]);
+        frame.render_widget(errors_widget(&dns.errors), chunks[4]);
     }
 }
 
