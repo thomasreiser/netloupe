@@ -25,7 +25,7 @@ const OVERVIEW_CHECKS: &[CheckId] = &[
     CheckId::AltNames,
 ];
 
-pub fn render(frame: &mut Frame, area: Rect, tab: &TabState) {
+pub fn render(frame: &mut Frame, area: Rect, tab: &TabState, show_country_flags: bool) {
     let body = super::header_and_body(frame, area, tab, OVERVIEW_CHECKS);
 
     let sections = Layout::default()
@@ -68,7 +68,7 @@ pub fn render(frame: &mut Frame, area: Rect, tab: &TabState) {
         bottom[1],
         "LOCATION",
         theme::pane_accent(crate::app::Pane::Geo),
-        location_lines(tab),
+        location_lines(tab, show_country_flags),
     );
     card(
         frame,
@@ -247,11 +247,13 @@ fn bool_line(label: &str, ok: bool) -> Line<'static> {
     ])
 }
 
-fn location_lines(tab: &TabState) -> Vec<Line<'static>> {
+fn location_lines(tab: &TabState, show_country_flags: bool) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     if let Some(CheckUpdate::Geo(geo)) = &tab.slot(CheckId::Geo).update {
         if let Some(country) = &geo.country {
-            lines.push(kv("Country", country.clone()));
+            let label =
+                theme::with_country_flag(country, geo.country_code.as_deref(), show_country_flags);
+            lines.push(kv("Country", label));
         }
         if let Some(city) = &geo.city {
             lines.push(kv("City", city.clone()));

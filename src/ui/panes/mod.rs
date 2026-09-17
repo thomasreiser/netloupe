@@ -29,22 +29,28 @@ use super::theme;
 use crate::app::{CheckStatus, Pane, TabState};
 use crate::checks::CheckId;
 
-pub fn render(frame: &mut Frame, area: Rect, tab: &TabState, geoip: &crate::geoip::GeoipStatus) {
+pub fn render(
+    frame: &mut Frame,
+    area: Rect,
+    tab: &TabState,
+    geoip: &crate::geoip::GeoipStatus,
+    show_country_flags: bool,
+) {
     let pane = Pane::ALL
         .get(tab.active_pane)
         .copied()
         .unwrap_or(Pane::Overview);
     match pane {
-        Pane::Overview => overview::render(frame, area, tab),
+        Pane::Overview => overview::render(frame, area, tab, show_country_flags),
         Pane::Dns => dns::render(frame, area, tab),
         Pane::Mail => mail::render(frame, area, tab),
         Pane::PingTrace => ping_trace::render(frame, area, tab),
         Pane::Ports => ports::render(frame, area, tab),
         Pane::Tls => tls::render(frame, area, tab),
         Pane::Http => http::render(frame, area, tab),
-        Pane::IpAsn => ipasn::render(frame, area, tab),
+        Pane::IpAsn => ipasn::render(frame, area, tab, show_country_flags),
         Pane::Hosting => hosting::render(frame, area, tab),
-        Pane::Geo => geo::render(frame, area, tab, geoip),
+        Pane::Geo => geo::render(frame, area, tab, geoip, show_country_flags),
         Pane::Rep => rep::render(frame, area, tab),
     }
 }

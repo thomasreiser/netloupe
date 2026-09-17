@@ -132,6 +132,44 @@ pub fn pill(text: impl Into<String>, bg: Color) -> Span<'static> {
     )
 }
 
+/// A 2-letter ISO 3166-1 country code as a flag emoji (e.g. "de" ->
+/// "🇩🇪"), built from Unicode's regional-indicator symbols -- any
+/// terminal that doesn't recognize the pair just shows two boxed
+/// letters instead, which is why this is gated behind
+/// `Config::show_country_flags` at call sites rather than always on.
+/// `None` for anything that isn't exactly 2 ASCII letters.
+pub fn country_flag(code: &str) -> Option<String> {
+    let mut chars = code.chars();
+    let (a, b, rest) = (chars.next()?, chars.next()?, chars.next());
+    if rest.is_some() || !a.is_ascii_alphabetic() || !b.is_ascii_alphabetic() {
+        return None;
+    }
+    let regional_indicator = |c: char| {
+        char::from_u32(0x1F1E6 + c.to_ascii_uppercase() as u32 - 'A' as u32)
+            .expect("A-Z maps into the regional indicator symbol block")
+    };
+    Some(
+        [regional_indicator(a), regional_indicator(b)]
+            .iter()
+            .collect(),
+    )
+}
+
+/// Prefixes `text` with a flag emoji for `code` when `show_flags` is on
+/// and `code` is a valid 2-letter country code; otherwise returns `text`
+/// unchanged. The single place every pane that shows a country goes
+/// through, so `Config::show_country_flags` only needs to be checked
+/// once per call site.
+pub fn with_country_flag(text: &str, code: Option<&str>, show_flags: bool) -> String {
+    if !show_flags {
+        return text.to_string();
+    }
+    match code.and_then(country_flag) {
+        Some(flag) => format!("{flag} {text}"),
+        None => text.to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -151,5 +189,43 @@ mod tests {
     fn gradient_clamps_out_of_range_input() {
         assert_eq!(gradient(-1.0), gradient(0.0));
         assert_eq!(gradient(5.0), gradient(1.0));
+    }
+
+    #[test]
+    fn country_flag_builds_regional_indicator_pairs() {
+        assert_eq!(country_flag("DE"), Some("🇩🇪".to_string()));
+        assert_eq!(
+            country_flag("us"),
+            Some("🇺🇸".to_string()),
+            "case-insensitive"
+        );
+    }
+
+    #[test]
+    fn country_flag_rejects_anything_but_two_letters() {
+        assert_eq!(country_flag(""), None);
+        assert_eq!(country_flag("D"), None);
+        assert_eq!(country_flag("DEU"), None);
+        assert_eq!(country_flag("42"), None);
+    }
+
+    #[test]
+    fn with_country_flag_only_prefixes_when_enabled_and_valid() {
+        assert_eq!(with_country_flag("Germany", Some("DE"), true), "🇩🇪 Germany");
+        assert_eq!(
+            with_country_flag("Germany", Some("DE"), false),
+            "Germany",
+            "off by default"
+        );
+        assert_eq!(
+            with_country_flag("Germany", None, true),
+            "Germany",
+            "no code to build a flag from"
+        );
+        assert_eq!(
+            with_country_flag("Somewhere", Some("??"), true),
+            "Somewhere",
+            "not a real 2-letter code"
+        );
     }
 }
