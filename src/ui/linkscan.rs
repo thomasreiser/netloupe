@@ -110,6 +110,7 @@ fn candidate_regex() -> &'static Regex {
                 \d{1,3}(?:\.\d{1,3}){3}                                # IPv4-shaped
                 | [0-9a-fA-F]*(?::[0-9a-fA-F]{0,4}){2,}[0-9a-fA-F]*    # IPv6-shaped
                 | [A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)+\.?  # multi-label hostname
+                | (?i:\blocalhost\b)                                   # the one single-label exception
             ",
         )
         .expect("candidate_regex is a fixed, tested pattern")
@@ -157,6 +158,23 @@ mod tests {
         let buffer = render(40, 1, text);
         let spans = scan(&buffer, Rect::new(0, 0, 40, 1));
         assert!(spans.is_empty(), "{spans:?}");
+    }
+
+    #[test]
+    fn flags_localhost_as_a_link_despite_being_a_single_label() {
+        let text = "Host       localhost";
+        let buffer = render(40, 1, text);
+        let spans = scan(&buffer, Rect::new(0, 0, 40, 1));
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].text, "localhost");
+        assert_eq!(spans[0].target, Target::parse("localhost").unwrap());
+
+        // Case-insensitive, and doesn't match as a substring of a longer
+        // word.
+        let buffer = render(40, 1, "LocalHost mylocalhost123");
+        let spans = scan(&buffer, Rect::new(0, 0, 40, 1));
+        assert_eq!(spans.len(), 1, "{spans:?}");
+        assert_eq!(spans[0].text, "LocalHost");
     }
 
     /// "Washington, D.C." is syntactically a valid two-label hostname
