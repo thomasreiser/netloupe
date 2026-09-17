@@ -79,21 +79,31 @@ pub fn render(frame: &mut Frame, area: Rect, tab: &TabState) {
     // scroll separately.
     const MAX_TABLE_ROWS_SHOWN: u16 = 12;
     const MAX_NS_ROWS_SHOWN: u16 = 6;
-    let table_height = (record_rows.len() as u16 + 1)
-        .min(MAX_TABLE_ROWS_SHOWN)
-        .min(area.height.saturating_sub(6));
     let ns_height = if ns_rows.is_empty() {
         0
     } else {
         (ns_rows.len() as u16 + 3).min(MAX_NS_ROWS_SHOWN + 3)
     };
+    let errors_height = dns.errors.len().min(4) as u16;
+    // Reserves room for everything else the layout below needs (the
+    // Nameservers section, the Discovery panel's own `Min(3)`, and any
+    // errors) before capping the main table's height -- otherwise, on a
+    // short terminal, the total requested height could exceed what's
+    // actually available and ratatui's layout solver would shrink the
+    // table itself to make room, potentially squeezing its header (and
+    // the TTL column with it) out entirely rather than just leaving
+    // fewer Discovery rows visible.
+    let reserved_for_others = ns_height + 3 + errors_height;
+    let table_height = (record_rows.len() as u16 + 1)
+        .min(MAX_TABLE_ROWS_SHOWN)
+        .min(area.height.saturating_sub(reserved_for_others));
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(table_height),
             Constraint::Length(ns_height),
             Constraint::Min(3),
-            Constraint::Length(dns.errors.len().min(4) as u16),
+            Constraint::Length(errors_height),
         ])
         .split(body);
 

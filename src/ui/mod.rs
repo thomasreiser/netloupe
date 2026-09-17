@@ -1364,6 +1364,83 @@ mod tests {
         );
     }
 
+    /// On a modest (not huge) terminal, a domain with plenty of records
+    /// and several nameservers must still show the main table's header
+    /// (and TTL column) -- the height budgeted for the main table has
+    /// to account for the Nameservers section, the Discovery panel, and
+    /// any errors, or ratatui's layout solver ends up shrinking the
+    /// table itself (and its header) to make the rest fit.
+    #[test]
+    fn dns_pane_shows_the_ttl_header_with_many_records_on_a_modest_terminal() {
+        let mut state = AppState::new(Config::default(), ProviderDb::default());
+        let mut tab = empty_tab(1, "example.com");
+        tab.active_pane = Pane::ALL.iter().position(|&p| p == Pane::Dns).unwrap();
+
+        let mut records = vec![
+            crate::checks::dns::DnsRecordRow {
+                record_type: "A",
+                value: "93.184.216.34".to_string(),
+                ttl: Some(3600),
+            },
+            crate::checks::dns::DnsRecordRow {
+                record_type: "AAAA",
+                value: "2606:2800:220:1:248:1893:25c8:1946".to_string(),
+                ttl: Some(3600),
+            },
+            crate::checks::dns::DnsRecordRow {
+                record_type: "MX",
+                value: "10 mail.example.com.".to_string(),
+                ttl: Some(3600),
+            },
+            crate::checks::dns::DnsRecordRow {
+                record_type: "TXT",
+                value: "v=spf1 include:_spf.example.com ~all".to_string(),
+                ttl: Some(3600),
+            },
+            crate::checks::dns::DnsRecordRow {
+                record_type: "CAA",
+                value: "0 issue \"letsencrypt.org\"".to_string(),
+                ttl: Some(3600),
+            },
+        ];
+        for n in 1..=4 {
+            records.push(crate::checks::dns::DnsRecordRow {
+                record_type: "NS",
+                value: format!("ns{n}.example.com."),
+                ttl: Some(86400),
+            });
+        }
+
+        tab.checks.insert(
+            CheckId::Dns,
+            CheckSlot {
+                status: CheckStatus::Done,
+                update: Some(CheckUpdate::Dns(crate::checks::dns::DnsResult {
+                    resolver: "system".to_string(),
+                    records,
+                    errors: vec!["SRV: no records found".to_string()],
+                    ..Default::default()
+                })),
+            },
+        );
+        state.tabs.push(tab);
+
+        // A common default size, not an especially tall one.
+        let backend = TestBackend::new(100, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| draw(frame, &state)).unwrap();
+        let content = buffer_to_string(terminal.backend().buffer());
+
+        assert!(
+            content.contains("TYPE") && content.contains("VALUE") && content.contains("TTL"),
+            "the main table's header must survive at a modest terminal size: {content}"
+        );
+        assert!(
+            content.contains("3600s"),
+            "expected at least one record's TTL to be visible: {content}"
+        );
+    }
+
     /// A zone walk that fails immediately (e.g. it can't actually enter
     /// the NSEC chain) must surface why, rather than looking identical
     /// to one that simply hasn't found any names yet.
