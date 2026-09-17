@@ -1670,6 +1670,42 @@ mod tests {
         );
     }
 
+    /// The resolver shows above the record table as its own line,
+    /// rather than as a synthetic first row inside it.
+    #[test]
+    fn dns_pane_shows_the_resolver_above_the_table() {
+        let mut state = AppState::new(Config::default(), ProviderDb::default());
+        state.tabs.push(populated_tab());
+        state.tabs[0].active_pane = Pane::ALL.iter().position(|&p| p == Pane::Dns).unwrap();
+        let backend = TestBackend::new(100, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| draw(frame, &state)).unwrap();
+        let content = buffer_to_string(terminal.backend().buffer());
+
+        let resolver_row = content
+            .lines()
+            .position(|l| l.contains("Resolver") && l.contains("system default"))
+            .expect("expected a resolver line");
+        let header_row = content
+            .lines()
+            .position(|l| l.contains("TYPE") && l.contains("VALUE") && l.contains("TTL"))
+            .expect("expected the table's header row");
+        assert!(
+            resolver_row < header_row,
+            "the resolver line should be above the table, not inside it: {content}"
+        );
+
+        let table_region = content
+            .lines()
+            .skip(header_row)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !table_region.contains("Resolver"),
+            "the resolver shouldn't also appear as a row inside the table: {table_region}"
+        );
+    }
+
     /// Once a check has a coordinate, the Geo pane must show the world
     /// map (see `worldmap::render_map`) with a pinpoint on it, not just
     /// the plain country/city table.
