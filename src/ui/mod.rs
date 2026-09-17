@@ -1706,6 +1706,35 @@ mod tests {
         );
     }
 
+    /// `panes::header_and_body` puts a blank row between the status
+    /// header (check badges) and the pane's own content -- every pane
+    /// goes through it, so proving this once here covers all of them,
+    /// rather than one pane at a time.
+    #[test]
+    fn a_blank_row_separates_the_status_header_from_the_panes_content() {
+        let mut state = AppState::new(Config::default(), ProviderDb::default());
+        state.tabs.push(populated_tab());
+        state.tabs[0].active_pane = Pane::ALL.iter().position(|&p| p == Pane::Geo).unwrap();
+
+        let backend = TestBackend::new(100, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| draw(frame, &state)).unwrap();
+        let content = buffer_to_string(terminal.backend().buffer());
+
+        let header_row = content
+            .lines()
+            .position(|l| l.contains("● Geo"))
+            .expect("expected the status header's check badge");
+        let next_line = content
+            .lines()
+            .nth(header_row + 1)
+            .expect("expected a line after the status header");
+        assert!(
+            !next_line.chars().any(char::is_alphanumeric),
+            "expected a blank row (just borders/whitespace, no content) between the status header and the pane's content: {next_line:?}"
+        );
+    }
+
     /// Once a check has a coordinate, the Geo pane must show the world
     /// map (see `worldmap::render_map`) with a pinpoint on it, not just
     /// the plain country/city table.

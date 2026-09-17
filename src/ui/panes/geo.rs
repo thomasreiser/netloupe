@@ -23,6 +23,7 @@ pub fn render(
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(1), Constraint::Min(0)])
+        .spacing(1)
         .split(body);
     render_geoip_status(frame, chunks[0], geoip);
     let body = chunks[1];
@@ -85,6 +86,7 @@ pub fn render(
             let rows = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+                .spacing(1)
                 .split(body);
             render_map(frame, rows[1], lat, lon);
             rows[0]
@@ -98,6 +100,7 @@ pub fn render(
             Constraint::Min(0),
             Constraint::Length(geo.errors.len().min(4) as u16),
         ])
+        .spacing(1)
         .split(table_area);
     crate::ui::widgets::kv_table::render(frame, chunks[0], &rows, tab.scroll);
     if !geo.errors.is_empty() {

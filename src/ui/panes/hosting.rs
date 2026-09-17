@@ -103,6 +103,7 @@ pub fn render(frame: &mut Frame, area: Rect, tab: &TabState) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(0), Constraint::Length(1)])
+        .spacing(1)
         .split(body);
     let max_offset = items.len().saturating_sub(1);
     let mut list_state = ListState::default().with_offset((tab.scroll as usize).min(max_offset));

@@ -36,6 +36,7 @@ pub fn render(frame: &mut Frame, area: Rect, tab: &TabState, show_country_flags:
             Constraint::Min(0),
             Constraint::Length(info.errors.len().min(4) as u16),
         ])
+        .spacing(1)
         .split(body);
 
     if !is_global {

@@ -79,16 +79,20 @@ pub fn render(frame: &mut Frame, area: Rect, tab: &TabState) {
     let errors_height = dns.errors.len().min(4) as u16;
     // Reserves room for everything else the layout below needs (the
     // resolver line, the Nameservers section, the Discovery panel's own
-    // `Min(3)`, and any errors) before capping the main table's height
-    // -- otherwise, on a short terminal, the total requested height
-    // could exceed what's actually available and ratatui's layout
-    // solver would shrink the table itself to make room, potentially
-    // squeezing its header (and the TTL column with it) out entirely
-    // rather than just leaving fewer Discovery rows visible.
-    let reserved_for_others = 1 + ns_height + 3 + errors_height;
+    // `Min(3)`, any errors, and the blank row `spacing(1)` puts between
+    // each of this layout's 5 regions -- 4 gaps) before capping the main
+    // table's height, against `body.height` (the pane's actual content
+    // area, already excluding the panel border and the status header)
+    // rather than the outer `area` -- otherwise, on a short terminal,
+    // the total requested height could exceed what's actually available
+    // and ratatui's layout solver would shrink the table itself to make
+    // room, potentially squeezing its header (and the TTL column with
+    // it) out entirely rather than just leaving fewer Discovery rows
+    // visible.
+    let reserved_for_others = 1 + ns_height + 3 + errors_height + 4;
     let table_height = (record_rows.len() as u16 + 1)
         .min(MAX_TABLE_ROWS_SHOWN)
-        .min(area.height.saturating_sub(reserved_for_others));
+        .min(body.height.saturating_sub(reserved_for_others));
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -98,6 +102,7 @@ pub fn render(frame: &mut Frame, area: Rect, tab: &TabState) {
             Constraint::Min(3),
             Constraint::Length(errors_height),
         ])
+        .spacing(1)
         .split(body);
 
     let resolver_text = if dns.resolver == "system" {
