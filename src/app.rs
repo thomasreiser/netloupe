@@ -205,6 +205,19 @@ pub enum Mode {
         /// "saved" confirmation), shown under the list.
         message: Option<String>,
     },
+    /// What was downloaded, when, from where, and how big it is: the
+    /// GeoLite2 databases and the provider range-list cache. Snapshotted
+    /// once when opened (`AppState::open_data_info`) rather than kept
+    /// live -- a directory scan on every frame would violate rule 1
+    /// (rendering is pure), and the underlying files rarely change while
+    /// the popup is open anyway.
+    DataInfo {
+        geoip_cache_dir: Option<PathBuf>,
+        geoip_files: Vec<crate::geoip::CachedEdition>,
+        ranges_cache_dir: Option<PathBuf>,
+        ranges_files: Vec<crate::providers::update::CachedRangeFile>,
+        scroll: u16,
+    },
 }
 
 pub struct AppState {
@@ -232,12 +245,17 @@ pub struct AppState {
     /// bottom-right corner. Global rather than per-tab: the underlying
     /// database files are shared by every tab.
     pub geoip: crate::geoip::GeoipStatus,
-    /// Set by `app::run` once the background updater is spawned, so a
-    /// settings-editor commit can push the new config to it immediately
-    /// (see `handle_settings_action`) instead of it waiting out however
-    /// much of its current sleep is left. `None` in tests, which don't
-    /// run the background task at all.
-    geoip_config_tx: Option<tokio::sync::watch::Sender<Arc<Config>>>,
+    /// Live status of the provider range-list background updater (see
+    /// `crate::providers::update`), read by the status line's
+    /// bottom-right corner. Global rather than per-tab: the underlying
+    /// cache is shared by every tab's Hosting check.
+    pub ranges: crate::providers::update::RangesStatus,
+    /// Set by `app::run` once the background updaters (GeoLite2, provider
+    /// ranges) are spawned, so a settings-editor commit can push the new
+    /// config to them immediately (see `handle_settings_action`) instead
+    /// of each one waiting out however much of its current sleep is
+    /// left. `None` in tests, which don't run the background tasks at all.
+    config_tx: Option<tokio::sync::watch::Sender<Arc<Config>>>,
     /// The hostnames/IPs found in the last rendered frame (see
     /// `ui::linkscan`), across the whole terminal in absolute
     /// coordinates. Updated by `run`'s event loop right after each draw
@@ -271,7 +289,8 @@ impl AppState {
             last_resolver: None,
             config_path: Config::default_path().ok(),
             geoip: crate::geoip::GeoipStatus::default(),
-            geoip_config_tx: None,
+            ranges: crate::providers::update::RangesStatus::default(),
+            config_tx: None,
             clickable_spans: Vec::new(),
             system_resolvers: crate::checks::dns::system_resolver_ips(),
             next_tab_id: AtomicU64::new(1),
@@ -295,6 +314,48 @@ impl AppState {
                 for tab in &self.tabs {
                     self.spawn_one_check(
                         CheckId::Geo,
+                        tab.id,
+                        tab.target.clone(),
+                        tab.cancel.clone(),
+                        tab.shared.clone(),
+                        tab.resolver,
+                        tab.ping_paused.clone(),
+                        sender.clone(),
+                    );
+                }
+            }
+        }
+    }
+
+    /// Applies a refresh signal from the provider range-list background
+    /// updater (`crate::providers::update::run_background_updater`).
+    fn apply_ranges_event(
+        &mut self,
+        event: crate::providers::update::RangesEvent,
+        sender: &mpsc::Sender<CheckEvent>,
+    ) {
+        match event {
+            crate::providers::update::RangesEvent::Status(status) => {
+                self.data_age_warning = match status.data_as_of {
+                    Some(t) if crate::refresh::age_of(t) > self.config.hosting.max_data_age => {
+                        Some(format!(
+                            "hosting provider data is {} old",
+                            crate::refresh::humanize_age(crate::refresh::age_of(t))
+                        ))
+                    }
+                    _ => None,
+                };
+                self.ranges = status;
+            }
+            crate::providers::update::RangesEvent::Refreshed(providers) => {
+                self.providers = providers;
+                // A freshly reloaded provider database doesn't apply to
+                // an already-open tab's Hosting pane until its check runs
+                // again -- do that now instead of leaving it on whatever
+                // it last evaluated until the user presses 'r'.
+                for tab in &self.tabs {
+                    self.spawn_one_check(
+                        CheckId::Hosting,
                         tab.id,
                         tab.target.clone(),
                         tab.cancel.clone(),
@@ -560,6 +621,34 @@ impl AppState {
         };
     }
 
+    /// Scans both cache directories once and opens the data-info popup
+    /// with the result (see `Mode::DataInfo`'s doc comment for why this
+    /// happens here rather than at render time).
+    fn open_data_info(&mut self) {
+        let geoip_cache_dir = crate::geoip::cache_dir();
+        let geoip_files = geoip_cache_dir
+            .as_deref()
+            .map(crate::geoip::list_cached_files)
+            .unwrap_or_default();
+        let ranges_cache_dir = crate::providers::update::cache_dir();
+        let ranges_files = ranges_cache_dir
+            .as_deref()
+            .map(|dir| {
+                crate::providers::update::list_cached_files(
+                    self.config.hosting.extra_signature_dir.as_deref(),
+                    dir,
+                )
+            })
+            .unwrap_or_default();
+        self.mode = Mode::DataInfo {
+            geoip_cache_dir,
+            geoip_files,
+            ranges_cache_dir,
+            ranges_files,
+            scroll: 0,
+        };
+    }
+
     /// All key handling while `Mode::Settings` is active. Kept as its own
     /// method (see the guard in `handle_action`) since committing a field
     /// needs to update `self.config`/write `self.config_path` alongside
@@ -620,7 +709,7 @@ impl AppState {
                                     .as_ref()
                                     .and_then(|path| draft.save(path).err());
                                 self.config = Arc::new((*draft).clone());
-                                if let Some(tx) = &self.geoip_config_tx {
+                                if let Some(tx) = &self.config_tx {
                                     let _ = tx.send(self.config.clone());
                                 }
                                 message = Some(match (&self.config_path, write_err) {
@@ -723,6 +812,20 @@ impl AppState {
             (Mode::NewHostPrompt(_), Action::InputCancel) => self.mode = Mode::Normal,
             (Mode::Help, Action::ToggleHelp) | (Mode::Help, Action::InputCancel) => {
                 self.mode = Mode::Normal
+            }
+            (Mode::DataInfo { .. }, Action::ToggleDataInfo)
+            | (Mode::DataInfo { .. }, Action::InputCancel) => self.mode = Mode::Normal,
+            (Mode::DataInfo { scroll, .. }, Action::ScrollUp) => {
+                *scroll = scroll.saturating_sub(1);
+            }
+            (Mode::DataInfo { scroll, .. }, Action::ScrollDown) => {
+                *scroll = scroll.saturating_add(1);
+            }
+            (Mode::DataInfo { scroll, .. }, Action::ScrollPageUp) => {
+                *scroll = scroll.saturating_sub(10);
+            }
+            (Mode::DataInfo { scroll, .. }, Action::ScrollPageDown) => {
+                *scroll = scroll.saturating_add(10);
             }
             (Mode::ConfirmPorts, Action::InputChar('y')) => {
                 self.mode = Mode::Normal;
@@ -912,6 +1015,7 @@ impl AppState {
                 }
             }
             Action::ToggleHelp => self.mode = Mode::Help,
+            Action::ToggleDataInfo => self.open_data_info(),
             Action::OpenAltNames => self.open_alt_names_picker(),
             Action::OpenZoneWalk => self.open_zone_walk_confirm(),
             Action::OpenSettings => self.open_settings(),
@@ -1066,6 +1170,15 @@ fn decode_key(mode: &Mode, key: crossterm::event::KeyEvent) -> Action {
             KeyCode::Esc | KeyCode::Char('q') => Action::InputCancel,
             _ => Action::None,
         },
+        Mode::DataInfo { .. } => match key.code {
+            KeyCode::Char('d') => Action::ToggleDataInfo,
+            KeyCode::Esc | KeyCode::Char('q') => Action::InputCancel,
+            KeyCode::Up => Action::ScrollUp,
+            KeyCode::Down => Action::ScrollDown,
+            KeyCode::PageUp => Action::ScrollPageUp,
+            KeyCode::PageDown => Action::ScrollPageDown,
+            _ => Action::None,
+        },
         Mode::SelectAltName { .. } => match key.code {
             KeyCode::Up | KeyCode::Char('k') => Action::SelectUp,
             KeyCode::Down | KeyCode::Char('j') => Action::SelectDown,
@@ -1138,6 +1251,7 @@ fn decode_normal_key(key: crossterm::event::KeyEvent) -> Action {
         KeyCode::Char('w') => Action::OpenZoneWalk,
         KeyCode::Char('y') => Action::CopyPane,
         KeyCode::Char('s') => Action::OpenSettings,
+        KeyCode::Char('d') => Action::ToggleDataInfo,
         KeyCode::Char(' ') => Action::TogglePingPause,
         KeyCode::Char('?') => Action::ToggleHelp,
         KeyCode::Char('q') => Action::Quit,
@@ -1245,14 +1359,22 @@ pub async fn run(
     let (check_tx, mut check_rx) = mpsc::channel::<CheckEvent>(1024);
     let mut state = AppState::new(config, providers);
 
-    let (geoip_config_tx, geoip_config_rx) = tokio::sync::watch::channel(state.config.clone());
-    state.geoip_config_tx = Some(geoip_config_tx);
+    let (config_tx, config_rx) = tokio::sync::watch::channel(state.config.clone());
+    state.config_tx = Some(config_tx);
     let (geoip_event_tx, mut geoip_event_rx) = mpsc::unbounded_channel();
     if let Some(geoip_cache_dir) = crate::geoip::cache_dir() {
         tokio::spawn(crate::geoip::run_background_updater(
-            geoip_config_rx,
+            config_rx.clone(),
             geoip_event_tx,
             geoip_cache_dir,
+        ));
+    }
+    let (ranges_event_tx, mut ranges_event_rx) = mpsc::unbounded_channel();
+    if let Some(ranges_cache_dir) = crate::providers::update::cache_dir() {
+        tokio::spawn(crate::providers::update::run_background_updater(
+            config_rx.clone(),
+            ranges_event_tx,
+            ranges_cache_dir,
         ));
     }
 
@@ -1301,6 +1423,9 @@ pub async fn run(
             }
             Some(geoip_event) = geoip_event_rx.recv() => {
                 state.apply_geoip_event(geoip_event, &check_tx);
+            }
+            Some(ranges_event) = ranges_event_rx.recv() => {
+                state.apply_ranges_event(ranges_event, &check_tx);
             }
         }
 
@@ -1845,6 +1970,86 @@ mod tests {
             Action::None,
             "the help overlay isn't a mouse-aware mode"
         );
+    }
+
+    #[test]
+    fn toggle_data_info_opens_and_closes_the_popup() {
+        let mut state = AppState::new(Config::default(), ProviderDb::default());
+        let tx = test_sender();
+
+        state.handle_action(Action::ToggleDataInfo, &tx);
+        assert!(matches!(state.mode, Mode::DataInfo { .. }));
+
+        state.handle_action(Action::InputCancel, &tx);
+        assert!(matches!(state.mode, Mode::Normal));
+
+        // 'd' toggles it shut again too, same as '?' does for Help.
+        state.handle_action(Action::ToggleDataInfo, &tx);
+        assert!(matches!(state.mode, Mode::DataInfo { .. }));
+        state.handle_action(Action::ToggleDataInfo, &tx);
+        assert!(matches!(state.mode, Mode::Normal));
+    }
+
+    #[test]
+    fn data_info_popup_scrolls_without_going_negative() {
+        let mut state = AppState::new(Config::default(), ProviderDb::default());
+        let tx = test_sender();
+
+        state.handle_action(Action::ToggleDataInfo, &tx);
+        state.handle_action(Action::ScrollUp, &tx);
+        let Mode::DataInfo { scroll, .. } = &state.mode else {
+            panic!("expected Mode::DataInfo");
+        };
+        assert_eq!(*scroll, 0);
+
+        state.handle_action(Action::ScrollPageDown, &tx);
+        let Mode::DataInfo { scroll, .. } = &state.mode else {
+            panic!("expected Mode::DataInfo");
+        };
+        assert_eq!(*scroll, 10);
+    }
+
+    /// A `Status` event from the ranges background updater should both
+    /// update `AppState::ranges` (for the status line) and set/clear
+    /// `data_age_warning` once the data is older than
+    /// `config.hosting.max_data_age`.
+    #[test]
+    fn ranges_status_event_updates_status_and_the_data_age_warning() {
+        use crate::providers::update::{RangesEvent, RangesStatus};
+
+        let mut state = AppState::new(Config::default(), ProviderDb::default());
+        let tx = test_sender();
+
+        state.apply_ranges_event(
+            RangesEvent::Status(RangesStatus {
+                downloading: false,
+                data_as_of: Some(
+                    std::time::SystemTime::now() - Duration::from_secs(60 * 24 * 3600),
+                ),
+                from_snapshot: true,
+                last_error: None,
+            }),
+            &tx,
+        );
+        assert_eq!(
+            state.ranges.status_text(),
+            "Ranges: 60d old (bundled snapshot)"
+        );
+        assert!(
+            state.data_age_warning.is_some(),
+            "60 days exceeds the default 30-day max_data_age"
+        );
+
+        state.apply_ranges_event(
+            RangesEvent::Status(RangesStatus {
+                downloading: false,
+                data_as_of: Some(std::time::SystemTime::now()),
+                from_snapshot: false,
+                last_error: None,
+            }),
+            &tx,
+        );
+        assert!(state.data_age_warning.is_none());
     }
 
     /// End-to-end: clicking the confirm prompt's "[y]" button must

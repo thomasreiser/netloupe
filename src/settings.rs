@@ -73,6 +73,12 @@ pub fn fields() -> Vec<SettingField> {
             },
         },
         SettingField {
+            label: "Hosting range update interval",
+            help: "e.g. \"6h\", \"1day\" -- how often provider IP-range lists refresh in the background",
+            get: |c| duration_get(c.hosting.range_update_interval),
+            set: |c, v| duration_set(v).map(|d| c.hosting.range_update_interval = d),
+        },
+        SettingField {
             label: "Hosting data max age",
             help: "e.g. \"30days\", \"12h\" -- warns in the Hosting pane past this age",
             get: |c| duration_get(c.hosting.max_data_age),

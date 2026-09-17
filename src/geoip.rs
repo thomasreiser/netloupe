@@ -16,6 +16,7 @@ use std::time::{Duration, SystemTime};
 use tokio::sync::{mpsc, watch};
 
 use crate::config::Config;
+use crate::refresh;
 use crate::retry::{self, Failure};
 
 pub const CITY_EDITION: &str = "GeoLite2-City";
@@ -68,32 +69,15 @@ impl GeoipStatus {
             return "GeoIP: no credentials".to_string();
         }
         match (self.last_success, self.last_error.is_some()) {
-            (Some(t), false) => format!("GeoIP: {} old", humanize_age(age_of(t))),
-            (Some(t), true) => format!("GeoIP: {} old (refresh failed)", humanize_age(age_of(t))),
+            (Some(t), false) => format!("GeoIP: {} old", refresh::humanize_age(refresh::age_of(t))),
+            (Some(t), true) => format!(
+                "GeoIP: {} old (refresh failed)",
+                refresh::humanize_age(refresh::age_of(t))
+            ),
             (None, true) => "GeoIP: download failed".to_string(),
             (None, false) => "GeoIP: pending".to_string(),
         }
     }
-}
-
-fn age_of(t: SystemTime) -> Duration {
-    t.elapsed().unwrap_or_default()
-}
-
-fn humanize_age(d: Duration) -> String {
-    let secs = d.as_secs();
-    if secs < 60 {
-        return format!("{secs}s");
-    }
-    let mins = secs / 60;
-    if mins < 60 {
-        return format!("{mins}m");
-    }
-    let hours = mins / 60;
-    if hours < 48 {
-        return format!("{hours}h");
-    }
-    format!("{}d", hours / 24)
 }
 
 /// Sent from the background updater to the event loop.
@@ -131,11 +115,11 @@ pub async fn run_background_updater(
                 last_success: last_success(&cache_dir),
                 last_error: None,
             }));
-            wait_for_change_or(&mut config_rx, Duration::from_secs(300)).await;
+            refresh::wait_for_change_or(&mut config_rx, Duration::from_secs(300)).await;
             continue;
         };
 
-        if is_due(&cache_dir, geoip_config.update_interval) {
+        if refresh::is_due(last_success(&cache_dir), geoip_config.update_interval) {
             let _ = status_tx.send(GeoipEvent::Status(GeoipStatus {
                 configured: true,
                 downloading: true,
@@ -158,15 +142,9 @@ pub async fn run_background_updater(
             last_error: last_error.clone(),
         }));
 
-        let sleep_for = time_until_due(&cache_dir, geoip_config.update_interval);
-        wait_for_change_or(&mut config_rx, sleep_for).await;
-    }
-}
-
-async fn wait_for_change_or(config_rx: &mut watch::Receiver<Arc<Config>>, dur: Duration) {
-    tokio::select! {
-        _ = config_rx.changed() => {}
-        _ = tokio::time::sleep(dur) => {}
+        let sleep_for =
+            refresh::time_until_due(last_success(&cache_dir), geoip_config.update_interval);
+        refresh::wait_for_change_or(&mut config_rx, sleep_for).await;
     }
 }
 
@@ -193,21 +171,6 @@ fn last_success(cache_dir: &Path) -> Option<SystemTime> {
         (Some(a), None) | (None, Some(a)) => Some(a),
         (None, None) => None,
     }
-}
-
-fn is_due(cache_dir: &Path, interval: Duration) -> bool {
-    match last_success(cache_dir) {
-        None => true,
-        Some(t) => t.elapsed().unwrap_or(Duration::MAX) >= interval,
-    }
-}
-
-fn time_until_due(cache_dir: &Path, interval: Duration) -> Duration {
-    let remaining = match last_success(cache_dir) {
-        None => Duration::from_secs(1),
-        Some(t) => interval.saturating_sub(t.elapsed().unwrap_or(interval)),
-    };
-    remaining.max(Duration::from_secs(1))
 }
 
 /// Downloads and extracts both GeoLite2 editions into `dest_dir`. Stops
@@ -240,8 +203,7 @@ async fn download_one(
     edition_id: &str,
     dest_dir: &Path,
 ) -> Result<(), String> {
-    let url =
-        format!("https://download.maxmind.com/geoip/databases/{edition_id}/download?suffix=tar.gz");
+    let url = download_url(edition_id);
     let dest = dest_dir.join(format!("{edition_id}.mmdb"));
 
     retry::run(&retry::Policy::default(), || async {
@@ -271,6 +233,45 @@ async fn download_one(
     })
     .await
     .map_err(|e| format!("{edition_id}: {e}"))
+}
+
+/// MaxMind's per-edition download URL, shared by the actual download
+/// (`download_one`) and [`list_cached_files`]'s display-only "where did
+/// this come from" (the same URL either way).
+fn download_url(edition_id: &str) -> String {
+    format!("https://download.maxmind.com/geoip/databases/{edition_id}/download?suffix=tar.gz")
+}
+
+/// One downloaded GeoLite2 edition, for display in the data-info popup --
+/// not used by any load/download path.
+#[derive(Debug, Clone)]
+pub struct CachedEdition {
+    pub edition_id: &'static str,
+    pub source_url: String,
+    pub file: refresh::CachedFile,
+}
+
+/// Every GeoLite2 edition that's actually been downloaded into
+/// `cache_dir` so far. An edition not yet downloaded (no credentials
+/// configured, or the very first download still pending) is simply
+/// absent, not an error.
+pub fn list_cached_files(cache_dir: &Path) -> Vec<CachedEdition> {
+    [CITY_EDITION, ASN_EDITION]
+        .into_iter()
+        .filter_map(|edition_id| {
+            let path = cache_dir.join(format!("{edition_id}.mmdb"));
+            let metadata = std::fs::metadata(&path).ok()?;
+            Some(CachedEdition {
+                edition_id,
+                source_url: download_url(edition_id),
+                file: refresh::CachedFile {
+                    filename: format!("{edition_id}.mmdb"),
+                    size_bytes: metadata.len(),
+                    modified: metadata.modified().ok(),
+                },
+            })
+        })
+        .collect()
 }
 
 /// Extracts the single `.mmdb` member out of a `tar.gz` archive body,
@@ -347,17 +348,25 @@ mod tests {
     }
 
     #[test]
-    fn humanize_age_picks_the_coarsest_useful_unit() {
-        assert_eq!(humanize_age(Duration::from_secs(30)), "30s");
-        assert_eq!(humanize_age(Duration::from_secs(90)), "1m");
-        assert_eq!(humanize_age(Duration::from_secs(3 * 3600)), "3h");
-        assert_eq!(humanize_age(Duration::from_secs(3 * 24 * 3600)), "3d");
+    fn list_cached_files_only_reports_editions_actually_on_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(list_cached_files(dir.path()).is_empty());
+
+        std::fs::write(city_db_path(dir.path()), b"fake city db").unwrap();
+        let files = list_cached_files(dir.path());
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].edition_id, CITY_EDITION);
+        assert_eq!(files[0].file.size_bytes, 12);
+        assert!(files[0].source_url.contains(CITY_EDITION));
     }
 
     #[test]
     fn is_due_when_nothing_downloaded_yet() {
         let dir = tempfile::tempdir().unwrap();
-        assert!(is_due(dir.path(), Duration::from_secs(3600)));
+        assert!(refresh::is_due(
+            last_success(dir.path()),
+            Duration::from_secs(3600)
+        ));
     }
 
     #[test]
@@ -365,7 +374,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(city_db_path(dir.path()), b"x").unwrap();
         std::fs::write(asn_db_path(dir.path()), b"x").unwrap();
-        assert!(!is_due(dir.path(), Duration::from_secs(3600)));
+        assert!(!refresh::is_due(
+            last_success(dir.path()),
+            Duration::from_secs(3600)
+        ));
     }
 
     /// Builds a minimal `tar.gz` in memory (mirroring the layout MaxMind
