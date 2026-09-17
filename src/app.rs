@@ -558,6 +558,16 @@ impl AppState {
                     selected += 1;
                 }
             }
+            Action::SelectIndex(i) if editing.is_none() => {
+                // A click on a field row both selects it and opens it for
+                // editing -- there's no separate mouse "confirm" step the
+                // way Enter is from the keyboard.
+                if let Some(field) = fields.get(i) {
+                    selected = i;
+                    editing = Some((field.get)(&draft));
+                    message = None;
+                }
+            }
             Action::InputChar(c) => {
                 if let Some(buf) = &mut editing {
                     buf.push(c);
@@ -726,6 +736,22 @@ impl AppState {
                     // Ctrl+T's new-host flow is -- re-prompting here would
                     // just be friction for the common case of wanting the
                     // same (often custom, e.g. internal) resolver again.
+                    let resolver = self.active().and_then(|t| t.resolver);
+                    self.mode = Mode::Normal;
+                    self.open_tab(target, resolver, sender);
+                }
+            }
+            (Mode::SelectAltName { names, selected }, Action::SelectIndex(i)) => {
+                if i < names.len() {
+                    *selected = i;
+                }
+                // Reuses the same "open it" logic as InputSubmit: a click
+                // on a list row is one deliberate choice, not a two-step
+                // select-then-confirm the way keyboard navigation is.
+                if let Some(target) = names
+                    .get(*selected)
+                    .and_then(|n| Target::parse(&n.name).ok())
+                {
                     let resolver = self.active().and_then(|t| t.resolver);
                     self.mode = Mode::Normal;
                     self.open_tab(target, resolver, sender);
@@ -1026,17 +1052,22 @@ fn decode_normal_key(key: crossterm::event::KeyEvent) -> Action {
     }
 }
 
-/// Decodes a mouse event into an `Action`. Only meaningful in `Normal`
-/// mode and the two "yes/no" confirm prompts (mirroring `decode_key`'s
-/// Mode::ConfirmPorts | Mode::ConfirmZoneWalk arm: navigating away via a
-/// click shouldn't be trapped by an unanswered prompt any more than
-/// navigating away via a key is) -- every other mode is a modal popup
-/// expecting keyboard input, so a click anywhere just does nothing.
+/// Decodes a mouse event into an `Action`.
 ///
-/// `terminal_area` is the whole terminal (as `Terminal::size()` reports
-/// it, matching `Frame::area()` in `ui::draw`), used to translate the
-/// mouse's absolute row/column into "which row of the layout is this"
-/// and "which column within the tab bar's own content area" -- the outer
+/// Every modal popup (a prompt, a picker, the settings editor) gets
+/// first refusal via `ui::decode_popup_mouse`, which knows each popup's
+/// exact on-screen geometry (the same geometry its renderer draws, so
+/// the two can't drift apart) -- see its doc comment for the full
+/// per-mode behavior. `None` from it means either there's no popup at
+/// all (`Mode::Normal`) or -- for the two "yes/no" confirm prompts only
+/// -- the click wasn't on a Yes/No button, so it should still work as
+/// normal tab/pane navigation, mirroring `decode_key`'s identical
+/// fallthrough for those two modes.
+///
+/// `terminal_area` is the whole terminal (as last drawn; see `run`'s
+/// `last_area`, matching `Frame::area()`), used to translate the mouse's
+/// absolute row/column into "which row of the layout is this" and
+/// "which column within the tab bar's own content area" -- the outer
 /// frame has a 1-cell border on every side, which both offsets need to
 /// account for.
 fn decode_mouse(
@@ -1046,6 +1077,10 @@ fn decode_mouse(
     mouse: crossterm::event::MouseEvent,
 ) -> Action {
     use crossterm::event::{MouseButton, MouseEventKind};
+
+    if let Some(action) = crate::ui::decode_popup_mouse(mode, terminal_area, mouse) {
+        return action;
+    }
     if !matches!(
         mode,
         Mode::Normal | Mode::ConfirmPorts | Mode::ConfirmZoneWalk
@@ -1696,6 +1731,92 @@ mod tests {
             decode_mouse(&state.mode, terminal_area, &state, scroll_down),
             Action::None,
             "the help overlay isn't a mouse-aware mode"
+        );
+    }
+
+    /// End-to-end: clicking the confirm prompt's "[y]" button must
+    /// actually confirm the port scan when run through `decode_mouse` +
+    /// `handle_action`, the same path the real event loop uses (the
+    /// button-hit math itself is exercised in isolation in `ui::mod`'s
+    /// tests).
+    #[tokio::test]
+    async fn clicking_yes_on_the_ports_prompt_confirms_the_scan() {
+        let mut state = AppState::new(Config::default(), ProviderDb::default());
+        let tx = test_sender();
+        state.open_tab(local_target(), None, &tx);
+
+        let ports_index = Pane::ALL.iter().position(|&p| p == Pane::Ports).unwrap();
+        state.handle_action(Action::SelectPane(ports_index), &tx);
+        assert!(matches!(state.mode, Mode::ConfirmPorts));
+
+        let terminal_area = ratatui::layout::Rect::new(0, 0, 100, 40);
+        let popup = crate::ui::confirm_ports_popup(terminal_area);
+        let (button_row, col_offset) = crate::ui::confirm_button_row_and_col_offset(popup);
+        let yes_col =
+            col_offset + crate::ui::yes_no_spans(crate::ui::PORTS_QUESTION)[0].width() as u16;
+
+        let action = decode_mouse(
+            &state.mode,
+            terminal_area,
+            &state,
+            left_click(button_row, yes_col),
+        );
+        assert_eq!(action, Action::InputChar('y'));
+        state.handle_action(action, &tx);
+
+        assert!(matches!(state.mode, Mode::Normal));
+        assert_eq!(state.tabs[0].ports_confirmed, Some(true));
+    }
+
+    /// End-to-end: clicking outside the "new host" prompt's popup must
+    /// cancel it via the same `decode_mouse` + `handle_action` path.
+    #[tokio::test]
+    async fn clicking_outside_the_new_host_prompt_cancels_it() {
+        let mut state = AppState::new(Config::default(), ProviderDb::default());
+        let tx = test_sender();
+        state.handle_action(Action::NewTab, &tx);
+        assert!(matches!(state.mode, Mode::NewHostPrompt(_)));
+
+        let terminal_area = ratatui::layout::Rect::new(0, 0, 100, 40);
+        let action = decode_mouse(&state.mode, terminal_area, &state, left_click(0, 0));
+        assert_eq!(action, Action::InputCancel);
+        state.handle_action(action, &tx);
+        assert!(matches!(state.mode, Mode::Normal));
+    }
+
+    /// End-to-end: clicking a settings row opens it for editing,
+    /// pre-filled with its current value -- one click doing what
+    /// keyboard navigation needs an arrow-to-it-then-Enter for.
+    #[tokio::test]
+    async fn clicking_a_settings_row_opens_it_for_editing() {
+        let mut state = AppState::new(Config::default(), ProviderDb::default());
+        let tx = test_sender();
+        state.handle_action(Action::OpenSettings, &tx);
+        assert!(matches!(state.mode, Mode::Settings { .. }));
+
+        let terminal_area = ratatui::layout::Rect::new(0, 0, 100, 40);
+        let popup = crate::ui::settings_popup(terminal_area);
+        let third_row = popup.y + 1 + 2; // inner top, then the 3rd field
+
+        let action = decode_mouse(
+            &state.mode,
+            terminal_area,
+            &state,
+            left_click(third_row, popup.x + 2),
+        );
+        assert_eq!(action, Action::SelectIndex(2));
+        state.handle_action(action, &tx);
+
+        let Mode::Settings {
+            selected, editing, ..
+        } = &state.mode
+        else {
+            panic!("expected Settings mode");
+        };
+        assert_eq!(*selected, 2);
+        assert!(
+            editing.is_some(),
+            "the click should open the field for editing"
         );
     }
 }
