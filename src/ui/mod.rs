@@ -1013,6 +1013,16 @@ mod tests {
         dns.a.push(Ipv4Addr::new(93, 184, 216, 34));
         dns.ns.push("a.iana-servers.net.".into());
         dns.authenticated_data = true;
+        dns.records.push(crate::checks::dns::DnsRecordRow {
+            record_type: "A",
+            value: "93.184.216.34".to_string(),
+            ttl: Some(3600),
+        });
+        dns.records.push(crate::checks::dns::DnsRecordRow {
+            record_type: "NS",
+            value: "a.iana-servers.net.".to_string(),
+            ttl: Some(86400),
+        });
         tab.checks.insert(
             CheckId::Dns,
             CheckSlot {
@@ -1275,6 +1285,82 @@ mod tests {
         assert!(
             content.contains("🇺🇸"),
             "expected the US flag next to the country once enabled: {content}"
+        );
+    }
+
+    /// The DNS pane's main record table shows TYPE/VALUE/TTL columns
+    /// with a header, and nameservers get their own dedicated section
+    /// (with their own TTL column) rather than being mixed into the
+    /// main table a second time.
+    #[test]
+    fn dns_pane_splits_nameservers_into_their_own_section_with_ttl() {
+        let mut state = AppState::new(Config::default(), ProviderDb::default());
+        let mut tab = empty_tab(1, "example.com");
+        tab.active_pane = Pane::ALL.iter().position(|&p| p == Pane::Dns).unwrap();
+        tab.checks.insert(
+            CheckId::Dns,
+            CheckSlot {
+                status: CheckStatus::Done,
+                update: Some(CheckUpdate::Dns(crate::checks::dns::DnsResult {
+                    resolver: "system".to_string(),
+                    records: vec![
+                        crate::checks::dns::DnsRecordRow {
+                            record_type: "A",
+                            value: "93.184.216.34".to_string(),
+                            ttl: Some(3600),
+                        },
+                        crate::checks::dns::DnsRecordRow {
+                            record_type: "NS",
+                            value: "a.iana-servers.net.".to_string(),
+                            ttl: Some(86400),
+                        },
+                        crate::checks::dns::DnsRecordRow {
+                            record_type: "NS",
+                            value: "b.iana-servers.net.".to_string(),
+                            ttl: Some(86400),
+                        },
+                    ],
+                    ..Default::default()
+                })),
+            },
+        );
+        state.tabs.push(tab);
+
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| draw(frame, &state)).unwrap();
+        let content = buffer_to_string(terminal.backend().buffer());
+
+        assert!(
+            content.contains("TYPE"),
+            "main table needs a header: {content}"
+        );
+        assert!(content.contains("TTL"), "expected a TTL column: {content}");
+        assert!(
+            content.contains("3600s"),
+            "expected the A record's TTL: {content}"
+        );
+        assert!(
+            content.contains("Nameservers"),
+            "expected a dedicated Nameservers section: {content}"
+        );
+        assert!(content.contains("a.iana-servers.net."));
+        assert!(content.contains("b.iana-servers.net."));
+        assert!(
+            content.contains("86400s"),
+            "expected the nameservers' TTL: {content}"
+        );
+
+        // The main table's own TYPE column shouldn't repeat "NS" -- it's
+        // only shown in the Nameservers section.
+        let main_table_region = content
+            .lines()
+            .take_while(|l| !l.contains("Nameservers"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !main_table_region.contains("a.iana-servers.net."),
+            "nameservers shouldn't also appear in the main table: {main_table_region}"
         );
     }
 
