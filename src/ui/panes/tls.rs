@@ -146,7 +146,9 @@ pub fn render(frame: &mut Frame, area: Rect, tab: &TabState) {
             "Certificate issuance",
             theme::pane_accent(crate::app::Pane::Tls),
         );
-        let inner = block.inner(chunks[2]);
+        let inner = block
+            .inner(chunks[2])
+            .inner(ratatui::layout::Margin::new(1, 0));
         frame.render_widget(block, chunks[2]);
         frame.render_widget(
             Paragraph::new(acme_lines(acme)).wrap(Wrap { trim: false }),

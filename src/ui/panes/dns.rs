@@ -130,7 +130,7 @@ pub fn render(frame: &mut Frame, area: Rect, tab: &TabState) {
 
 fn render_nameservers(frame: &mut Frame, area: Rect, ns_rows: &[(String, String)]) {
     let block = theme::panel("Nameservers", theme::pane_accent(crate::app::Pane::Dns));
-    let inner = block.inner(area);
+    let inner = block.inner(area).inner(ratatui::layout::Margin::new(1, 0));
     frame.render_widget(block, area);
     crate::ui::widgets::kv_table::render_with_header(
         frame,
@@ -157,7 +157,7 @@ fn render_discovery(
     dns: &crate::checks::dns::DnsResult,
 ) {
     let block = theme::panel("Discovery", theme::pane_accent(crate::app::Pane::Dns));
-    let inner = block.inner(area);
+    let inner = block.inner(area).inner(ratatui::layout::Margin::new(1, 0));
     frame.render_widget(block, area);
 
     let mut lines: Vec<Line> = Vec::new();

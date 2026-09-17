@@ -19,7 +19,7 @@ mod ports;
 mod rep;
 mod tls;
 
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::layout::{Constraint, Direction, Layout, Margin, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Wrap};
@@ -71,7 +71,7 @@ pub(super) fn header_and_body(
     let accent = theme::pane_accent(pane);
     let subtitle = tab.target.display();
     let block = theme::panel_with_hint(pane.label(), &subtitle, theme::MUTED, accent);
-    let inner = block.inner(area);
+    let inner = block.inner(area).inner(Margin::new(1, 0));
     frame.render_widget(block, area);
 
     let chunks = Layout::default()

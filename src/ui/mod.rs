@@ -1735,6 +1735,41 @@ mod tests {
         );
     }
 
+    /// `panes::header_and_body` pads the pane's content 1 column in
+    /// from its left/right border (`Rect::inner(Margin::new(1, 0))`),
+    /// so content never sits flush against the border the way a blank
+    /// row already separates it from the status header above.
+    #[test]
+    fn a_blank_column_separates_the_panes_border_from_its_content() {
+        let mut state = AppState::new(Config::default(), ProviderDb::default());
+        state.tabs.push(populated_tab());
+        state.tabs[0].active_pane = Pane::ALL.iter().position(|&p| p == Pane::Geo).unwrap();
+
+        let backend = TestBackend::new(100, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| draw(frame, &state)).unwrap();
+        let content = buffer_to_string(terminal.backend().buffer());
+
+        let header_line = content
+            .lines()
+            .find(|l| l.contains("● Geo"))
+            .expect("expected the status header's check badge");
+        let chars: Vec<char> = header_line.chars().collect();
+        let badge_col = chars
+            .iter()
+            .position(|&c| c == '●')
+            .expect("expected the check badge glyph");
+        assert_eq!(
+            chars[badge_col - 1], ' ',
+            "expected a blank column of padding directly before the pane's content: {header_line:?}"
+        );
+        assert_eq!(
+            chars[badge_col - 2],
+            '│',
+            "expected the pane's own border right before that padding column: {header_line:?}"
+        );
+    }
+
     /// Once a check has a coordinate, the Geo pane must show the world
     /// map (see `worldmap::render_map`) with a pinpoint on it, not just
     /// the plain country/city table.

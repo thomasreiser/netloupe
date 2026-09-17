@@ -115,7 +115,7 @@ pub fn render(
 /// doc comment for why that's cheap enough to redo every frame).
 fn render_map(frame: &mut Frame, area: Rect, lat: f64, lon: f64) {
     let block = theme::panel("Map", theme::pane_accent(crate::app::Pane::Geo));
-    let inner = block.inner(area);
+    let inner = block.inner(area).inner(ratatui::layout::Margin::new(1, 0));
     frame.render_widget(block, area);
     let grid = crate::worldmap::render_map(lat, lon, inner.width, inner.height);
     frame.render_widget(crate::ui::widgets::worldmap::widget(&grid), inner);

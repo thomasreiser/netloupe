@@ -91,7 +91,7 @@ fn card(
     lines: Vec<Line<'static>>,
 ) {
     let block = theme::panel(title, accent);
-    let inner = block.inner(area);
+    let inner = block.inner(area).inner(ratatui::layout::Margin::new(1, 0));
     frame.render_widget(block, area);
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
@@ -325,7 +325,7 @@ fn render_alt_names(frame: &mut Frame, area: Rect, tab: &TabState) {
 
     let Some(CheckUpdate::AltNames(alt)) = &tab.slot(CheckId::AltNames).update else {
         let block = theme::panel(title, accent);
-        let inner = block.inner(area);
+        let inner = block.inner(area).inner(ratatui::layout::Margin::new(1, 0));
         frame.render_widget(block, area);
         frame.render_widget(
             super::empty_message("looking for other names pointing at the same destination..."),
@@ -336,7 +336,7 @@ fn render_alt_names(frame: &mut Frame, area: Rect, tab: &TabState) {
 
     if alt.names.is_empty() {
         let block = theme::panel(title, accent);
-        let inner = block.inner(area);
+        let inner = block.inner(area).inner(ratatui::layout::Margin::new(1, 0));
         frame.render_widget(block, area);
         frame.render_widget(
             super::empty_message(
@@ -353,7 +353,7 @@ fn render_alt_names(frame: &mut Frame, area: Rect, tab: &TabState) {
         theme::MUTED,
         accent,
     );
-    let inner = block.inner(area);
+    let inner = block.inner(area).inner(ratatui::layout::Margin::new(1, 0));
     frame.render_widget(block, area);
 
     // A real `Table` rather than manually padding a fixed-width string:
