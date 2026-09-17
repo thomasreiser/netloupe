@@ -339,6 +339,11 @@ impl AppState {
         };
         self.tabs.push(tab);
         self.active_tab = self.tabs.len() - 1;
+        // See `reset_scroll`'s doc comment: the new tab starts on
+        // Overview, showing completely different content than whatever
+        // was on screen (or none at all, on the very first tab) --
+        // any spans left over from before would be stale.
+        self.clickable_spans.clear();
 
         self.spawn_checks(
             id,
@@ -659,6 +664,9 @@ impl AppState {
         if self.active_tab >= self.tabs.len() && !self.tabs.is_empty() {
             self.active_tab = self.tabs.len() - 1;
         }
+        // See `reset_scroll`'s doc comment: whichever tab is now active
+        // (or none) shows different content than the closed one did.
+        self.clickable_spans.clear();
     }
 
     /// Applies one check event to whichever tab it's tagged with. Events
@@ -828,6 +836,10 @@ impl AppState {
                         tab.active_pane = i;
                         tab.scroll = 0;
                         tab.focused_link = None;
+                        // See `reset_scroll`'s doc comment: must not
+                        // leave the old pane's links to be drawn, stale,
+                        // over the new pane's content.
+                        self.clickable_spans.clear();
                         self.maybe_prompt_ports();
                     }
                 }
@@ -838,6 +850,7 @@ impl AppState {
                     tab.scroll = 0;
                     tab.focused_link = None;
                 }
+                self.clickable_spans.clear();
                 self.maybe_prompt_ports();
             }
             Action::PrevPane => {
@@ -846,6 +859,7 @@ impl AppState {
                     tab.scroll = 0;
                     tab.focused_link = None;
                 }
+                self.clickable_spans.clear();
                 self.maybe_prompt_ports();
             }
             Action::ScrollUp => self.scroll_by(-1),
@@ -967,6 +981,16 @@ impl AppState {
             tab.scroll = 0;
             tab.focused_link = None;
         }
+        // `clickable_spans` reflects the *previous* draw's content (see
+        // its doc comment) -- rendering still uses it for the very next
+        // frame, drawn *before* `run`'s loop gets a chance to rescan.
+        // Left in place across a tab/pane switch, that frame would
+        // overlay leftover link text from whatever was on screen before
+        // on top of the new pane's freshly-drawn (and differently laid
+        // out) content, corrupting it. Clearing it here means that one
+        // frame just renders with no link styling yet, rather than with
+        // wrong styling in the wrong place.
+        self.clickable_spans.clear();
     }
 
     /// Scrolls the active pane's content by `delta` lines/rows (negative
@@ -2000,5 +2024,54 @@ mod tests {
 
         state.handle_action(Action::NextPane, &tx);
         assert_eq!(state.tabs[0].focused_link, None);
+    }
+
+    /// Regression test: a bug report showed leftover link text from the
+    /// previous pane rendered garbled on top of the new pane's content
+    /// right after switching. Root cause: `clickable_spans` reflects the
+    /// *previous* draw (see its doc comment), so the very next frame
+    /// after a switch renders using spans positioned for content that's
+    /// no longer there -- unless the switch itself clears them first, so
+    /// that frame simply has no link styling yet instead of wrong
+    /// styling in the wrong place. Covers every action that changes what
+    /// the active pane shows.
+    #[tokio::test]
+    async fn switching_pane_or_tab_clears_stale_clickable_spans() {
+        let tx = test_sender();
+
+        let mut state = AppState::new(Config::default(), ProviderDb::default());
+        state.open_tab(local_target(), None, &tx);
+        state.clickable_spans = vec![fake_span(0, 0, "a.com")];
+        state.handle_action(Action::NextPane, &tx);
+        assert!(state.clickable_spans.is_empty(), "NextPane");
+
+        state.clickable_spans = vec![fake_span(0, 0, "a.com")];
+        state.handle_action(Action::PrevPane, &tx);
+        assert!(state.clickable_spans.is_empty(), "PrevPane");
+
+        state.clickable_spans = vec![fake_span(0, 0, "a.com")];
+        state.handle_action(Action::SelectPane(2), &tx);
+        assert!(state.clickable_spans.is_empty(), "SelectPane");
+
+        state.open_tab(Target::parse("192.168.1.2").unwrap(), None, &tx);
+        state.clickable_spans = vec![fake_span(0, 0, "a.com")];
+        state.handle_action(Action::SelectHostTab(0), &tx);
+        assert!(state.clickable_spans.is_empty(), "SelectHostTab");
+
+        state.clickable_spans = vec![fake_span(0, 0, "a.com")];
+        state.handle_action(Action::NextTab, &tx);
+        assert!(state.clickable_spans.is_empty(), "NextTab");
+
+        state.clickable_spans = vec![fake_span(0, 0, "a.com")];
+        state.handle_action(Action::PrevTab, &tx);
+        assert!(state.clickable_spans.is_empty(), "PrevTab");
+
+        state.clickable_spans = vec![fake_span(0, 0, "a.com")];
+        state.open_tab(Target::parse("192.168.1.3").unwrap(), None, &tx);
+        assert!(state.clickable_spans.is_empty(), "open_tab");
+
+        state.clickable_spans = vec![fake_span(0, 0, "a.com")];
+        state.handle_action(Action::CloseTab, &tx);
+        assert!(state.clickable_spans.is_empty(), "CloseTab");
     }
 }
