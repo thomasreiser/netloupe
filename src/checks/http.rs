@@ -75,10 +75,10 @@ pub struct PlainHttpProbe {
 /// on) -- so this is a real, independent yes/no per protocol, not just
 /// "here's the one the client preferred." The main flow's `http_version`
 /// only ever reports one of these (whichever a normal client's ALPN
-/// negotiation picks), which previously made it easy to misread "server
-/// picked HTTP/2" as "server doesn't support HTTP/3": the two are
-/// unrelated questions -- QUIC/HTTP-3 support isn't discoverable via
-/// ALPN over a plain TCP+TLS connection at all.
+/// negotiation picks), which reads like "server doesn't support HTTP/3"
+/// if that's read as the complete picture -- the two are unrelated
+/// questions: QUIC/HTTP-3 support isn't discoverable via ALPN over a
+/// plain TCP+TLS connection at all.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct HttpVersionSupport {
     /// HTTPS, a raw `GET / HTTP/1.0` request written directly over the

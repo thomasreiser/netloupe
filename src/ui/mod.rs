@@ -633,9 +633,7 @@ fn render_select_alt_name(
 
 fn render_help(frame: &mut Frame, area: Rect) {
     // Tall enough that all the rows below actually fit at a standard
-    // 24-row terminal (60% of 24 rows, minus the popup's own border,
-    // clipped the last couple of rows even before the mouse-support row
-    // was added).
+    // 24-row terminal.
     let popup = help_popup(area);
     frame.render_widget(Clear, popup);
     let block = theme::panel_with_hint("Help", "?/esc/click to close", theme::MUTED, theme::PURPLE);

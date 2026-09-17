@@ -5,21 +5,18 @@
 //! with an xtask command" shape as `data/snapshot/`'s provider ranges.
 //!
 //! Source: Natural Earth's public-domain vector data, via its GitHub
-//! GeoJSON mirror. Coastline/borders come from the 1:50m ("medium")
-//! set -- finer than the 1:110m set this used at first, which merged
-//! adjacent country borders in dense regions (e.g. central Europe) into
-//! a solid wash once rasterized; cities stay on 1:110m, since that's
-//! specifically the set Natural Earth curates down to world-significant
-//! places, and more detail there would mean more (less major) cities,
-//! not better major ones. Rasterized onto a 0.1-degree-per-cell grid:
-//! still deliberately coarse (a real vector renderer this isn't -- no
-//! anti-aliasing, no sub-cell line thickness), but fine enough that
-//! borders in a densely-partitioned region (e.g. Germany/Czechia/
-//! Austria/Switzerland) read as separate lines instead of a merged wash.
-//! 3600x1800 cells packed one bit each is ~790KB per bitmap -- still
-//! small next to a full-detail vector dataset, just not as aggressively
-//! tiny as an early 1-degree-grid version of this turned out to look in
-//! practice.
+//! GeoJSON mirror. Coastline/borders come from the 1:50m ("medium") set;
+//! cities stay on 1:110m, since that's specifically the set Natural
+//! Earth curates down to world-significant places, and more detail
+//! there would mean more (less major) cities, not better major ones.
+//! Rasterized onto a 0.1-degree-per-cell grid: still deliberately coarse
+//! (a real vector renderer this isn't -- no anti-aliasing, no sub-cell
+//! line thickness), but fine enough that borders in a densely-
+//! partitioned region (e.g. Germany/Czechia/Austria/Switzerland) read as
+//! separate lines rather than merging into a solid wash. 3600x1800 cells
+//! packed one bit each is ~790KB per bitmap -- small next to a
+//! full-detail vector dataset, while still fine enough to look like a
+//! recognizable map.
 
 use std::fs;
 use std::path::Path;
