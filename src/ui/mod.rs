@@ -1,6 +1,7 @@
 //! Rendering only: reads `AppState` and draws it. Never awaits, spawns
 //! tasks, or mutates state (architecture rule 1 in `CLAUDE.md`).
 
+pub mod linkscan;
 pub mod panes;
 pub mod tabs;
 pub mod theme;
@@ -13,6 +14,37 @@ use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap};
 use ratatui::Frame;
 
 use crate::app::{AppState, Mode};
+
+/// The overall vertical layout inside the outer frame's border: host
+/// tabs, pane tabs, body, status line. Factored out so `body_area` (used
+/// by `app::run`'s post-draw link scan) can compute the exact same
+/// `chunks[2]` this draws into without duplicating the split.
+fn layout_chunks(area: Rect) -> [Rect; 4] {
+    let inner = Rect::new(
+        area.x + 1,
+        area.y + 1,
+        area.width.saturating_sub(2),
+        area.height.saturating_sub(2),
+    );
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Min(0),
+            Constraint::Length(1),
+        ])
+        .margin(0)
+        .split(inner);
+    [chunks[0], chunks[1], chunks[2], chunks[3]]
+}
+
+/// The active pane's content area for a terminal of `area`'s size --
+/// what `ui::linkscan::scan` should search, so a click/focus-navigate
+/// never reaches into the tab bars, status line, or outer border.
+pub(crate) fn body_area(area: Rect) -> Rect {
+    layout_chunks(area)[2]
+}
 
 pub fn draw(frame: &mut Frame, state: &AppState) {
     let area = frame.area();
@@ -30,19 +62,9 @@ pub fn draw(frame: &mut Frame, state: &AppState) {
         .title(
             Line::from(Span::styled(" ? help ", Style::default().fg(theme::MUTED))).right_aligned(),
         );
-    let inner = frame_block.inner(area);
     frame.render_widget(frame_block, area);
 
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Min(0),
-            Constraint::Length(1),
-        ])
-        .margin(0)
-        .split(inner);
+    let chunks = layout_chunks(area);
 
     tabs::render_host_tabs(frame, chunks[0], state);
     tabs::render_pane_tabs(frame, chunks[1], state);
@@ -55,6 +77,8 @@ pub fn draw(frame: &mut Frame, state: &AppState) {
             chunks[2],
         ),
     }
+
+    render_clickable_links(frame, state);
 
     render_status_line(frame, chunks[3], state);
 
@@ -86,6 +110,37 @@ pub fn draw(frame: &mut Frame, state: &AppState) {
     }
 }
 
+/// Overlays styling for `state.clickable_spans` (the hostnames/IPs
+/// `ui::linkscan` found in the *previous* rendered frame -- see
+/// `AppState::clickable_spans`'s doc comment for why that one-frame lag
+/// is fine in practice) on top of whatever the pane just drew: every
+/// span gets a subtle underline marking it as clickable, and whichever
+/// one has keyboard focus (`Action::FocusNextLink`/`FocusPrevLink`) gets
+/// a solid highlight instead, the same visual language as a selected
+/// list row elsewhere in this app (e.g. `theme::pill`).
+fn render_clickable_links(frame: &mut Frame, state: &AppState) {
+    let focused = state.active().and_then(|t| t.focused_link);
+    for (i, span) in state.clickable_spans.iter().enumerate() {
+        let style = if Some(i) == focused {
+            Style::default()
+                .fg(Color::Rgb(18, 18, 24))
+                .bg(theme::CYAN)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+                .fg(theme::CYAN)
+                .add_modifier(Modifier::UNDERLINED)
+        };
+        let rect = Rect::new(
+            span.col_start,
+            span.row,
+            span.col_end.saturating_sub(span.col_start),
+            1,
+        );
+        frame.render_widget(Span::styled(span.text.clone(), style), rect);
+    }
+}
+
 fn render_status_line(frame: &mut Frame, area: Rect, state: &AppState) {
     let key = |k: &'static str| {
         Span::styled(
@@ -112,6 +167,9 @@ fn render_status_line(frame: &mut Frame, area: Rect, state: &AppState) {
         desc(" pane "),
         sep(),
         key("↑/↓"),
+        desc(" links "),
+        sep(),
+        key("PgUp/PgDn"),
         desc(" scroll "),
         sep(),
         key("r"),
@@ -599,7 +657,8 @@ fn render_help(frame: &mut Frame, area: Rect) {
         row("Ctrl+t / Ctrl+w", "New tab / close tab"),
         row("Tab / Shift+Tab", "Next / previous host tab"),
         row("1-9, 0, -, ←/→", "Switch pane"),
-        row("↑/↓, PgUp/PgDn", "Scroll the current pane's content"),
+        row("↑/↓, enter", "Move between/open clickable hostnames/IPs"),
+        row("PgUp/PgDn", "Scroll the current pane's content"),
         row("r", "Re-run checks for the current pane"),
         row("R", "Re-run all checks for the current host"),
         row("e", "Toggle evidence details (Hosting pane)"),
@@ -612,7 +671,7 @@ fn render_help(frame: &mut Frame, area: Rect) {
         row("q", "Quit"),
         row(
             "mouse",
-            "Click a tab to switch, scroll to scroll (additive)",
+            "Click a tab, a hostname/IP, or [y]/[N]; scroll to scroll",
         ),
     ];
     frame.render_widget(Paragraph::new(lines), inner);
@@ -846,6 +905,7 @@ mod tests {
             ports_confirmed: None,
             zone_walk_confirmed: None,
             scroll: 0,
+            focused_link: None,
             resolver: None,
             ping_paused: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
@@ -1099,6 +1159,52 @@ mod tests {
         );
     }
 
+    /// A hostname/IP `ui::linkscan` finds must render underlined, and
+    /// whichever one has keyboard focus (`TabState::focused_link`) must
+    /// render highlighted instead -- the two-tier visual language
+    /// `render_clickable_links` promises in its doc comment.
+    #[test]
+    fn clickable_links_are_underlined_and_the_focused_one_is_highlighted() {
+        let mut state = AppState::new(Config::default(), ProviderDb::default());
+        state.tabs.push(populated_tab());
+
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let terminal_area = Rect::new(0, 0, 120, 40);
+        let area = body_area(terminal_area);
+        let spans = {
+            let completed = terminal.draw(|frame| draw(frame, &state)).unwrap();
+            crate::ui::linkscan::scan(completed.buffer, area)
+        };
+        assert!(
+            spans.len() >= 2,
+            "expected at least two clickable spans in the populated Overview pane: {spans:?}"
+        );
+
+        state.clickable_spans = spans.clone();
+        state.tabs[0].focused_link = Some(0);
+        terminal.draw(|frame| draw(frame, &state)).unwrap();
+        let buffer = terminal.backend().buffer();
+
+        let focused_cell = buffer.cell((spans[0].col_start, spans[0].row)).unwrap();
+        assert_eq!(
+            focused_cell.bg,
+            theme::CYAN,
+            "the focused link should be highlighted, not just underlined"
+        );
+
+        let other_cell = buffer.cell((spans[1].col_start, spans[1].row)).unwrap();
+        assert!(
+            other_cell.modifier.contains(Modifier::UNDERLINED),
+            "a non-focused link should still be underlined"
+        );
+        assert_ne!(
+            other_cell.bg,
+            theme::CYAN,
+            "only the focused link gets the solid highlight"
+        );
+    }
+
     /// The GeoIP status must be visible both pinned to the bottom-right
     /// of the status line and at the top of the Geo pane -- the two
     /// places `render_status_line`/`geo::render` were changed to surface
@@ -1195,6 +1301,26 @@ mod tests {
     fn renders_at_a_very_small_terminal_without_panicking() {
         let mut state = AppState::new(Config::default(), ProviderDb::default());
         state.tabs.push(populated_tab());
+        render_at(20, 6, |frame| draw(frame, &state));
+    }
+
+    /// `AppState::clickable_spans` is one frame behind by design (see its
+    /// doc comment); if the terminal shrinks in that single frame, stale
+    /// spans can point outside the new, smaller buffer entirely. Ratatui
+    /// clips out-of-bounds widget areas rather than panicking, but this
+    /// pins that down for this specific case rather than just trusting it.
+    #[test]
+    fn renders_without_panicking_when_stale_spans_point_outside_a_shrunk_terminal() {
+        let mut state = AppState::new(Config::default(), ProviderDb::default());
+        state.tabs.push(populated_tab());
+        state.clickable_spans = vec![crate::ui::linkscan::ClickableSpan {
+            row: 30,
+            col_start: 90,
+            col_end: 105,
+            text: "example.com".to_string(),
+            target: Target::parse("example.com").unwrap(),
+        }];
+        state.tabs[0].focused_link = Some(0);
         render_at(20, 6, |frame| draw(frame, &state));
     }
 

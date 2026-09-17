@@ -19,6 +19,12 @@ pub enum Action {
     PrevTab,
     /// Jumps directly to a host tab by index, e.g. from clicking it.
     SelectHostTab(usize),
+    /// Opens a new tab for a hostname/IP found in the active pane's
+    /// content (see `ui::linkscan`), from clicking it directly. Reuses
+    /// the current tab's resolver rather than re-prompting -- the same
+    /// "quick cross-reference while already inspecting this host"
+    /// reasoning as `Mode::SelectAltName`'s click/Enter.
+    OpenLink(Target),
     SelectPane(usize),
     NextPane,
     PrevPane,
@@ -49,11 +55,29 @@ pub enum Action {
     SelectIndex(usize),
     /// Scrolls the active pane's content, for panes whose content is
     /// taller than the terminal (a long SAN list, a large DNS zone's
-    /// records, ...).
+    /// records, ...). `ScrollUp`/`ScrollDown` (fine, one-line scrolling)
+    /// are reachable only via the mouse wheel -- see `Action::FocusNextLink`
+    /// below for why Up/Down don't send them from the keyboard anymore.
+    /// `ScrollPageUp`/`ScrollPageDown` (Up on `PgUp`/`PgDn`) are the
+    /// keyboard's only scroll action.
     ScrollUp,
     ScrollDown,
     ScrollPageUp,
     ScrollPageDown,
+    /// Moves keyboard focus among `AppState::clickable_spans` (the
+    /// hostnames/IPs `ui::linkscan` found in the active pane's last
+    /// rendered content), one at a time, clamped at the ends -- not
+    /// wrapping, matching how `SelectUp`/`SelectDown` already behave in
+    /// this app's other list pickers. Bound to Up/Down instead of
+    /// scrolling: with every host/IP now clickable, moving between them
+    /// is the far more common thing to want from the keyboard than
+    /// nudging the scroll position by one line, and `PgUp`/`PgDn` still
+    /// cover scrolling.
+    FocusNextLink,
+    FocusPrevLink,
+    /// Opens whichever span currently has focus, if any -- the
+    /// keyboard's equivalent of clicking it.
+    ActivateFocusedLink,
     /// Raw text typed into the "new host" prompt.
     InputChar(char),
     InputBackspace,

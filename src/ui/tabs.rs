@@ -157,6 +157,7 @@ mod tests {
             ports_confirmed: None,
             zone_walk_confirmed: None,
             scroll: 0,
+            focused_link: None,
             resolver: None,
             ping_paused: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
