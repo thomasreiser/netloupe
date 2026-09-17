@@ -19,11 +19,10 @@ pub enum Action {
     PrevTab,
     /// Jumps directly to a host tab by index, e.g. from clicking it.
     SelectHostTab(usize),
-    /// Opens a new tab for a hostname/IP found in the active pane's
-    /// content (see `ui::linkscan`), from clicking it directly. Reuses
-    /// the current tab's resolver rather than re-prompting -- the same
-    /// "quick cross-reference while already inspecting this host"
-    /// reasoning as `Mode::SelectAltName`'s click/Enter.
+    /// A hostname/IP found in the active pane's content (see
+    /// `ui::linkscan`) was clicked directly: asks which DNS server to
+    /// query for it, the same `Mode::ChooseResolver` prompt every other
+    /// way of opening a new tab goes through.
     OpenLink(Target),
     SelectPane(usize),
     NextPane,
@@ -48,10 +47,11 @@ pub enum Action {
     SelectDown,
     /// Jumps a list-picker mode's selection directly to an index, e.g.
     /// from clicking a row. Interpreted per-mode: in `Mode::SelectAltName`
-    /// it also opens that name immediately (a click is one deliberate
-    /// choice, with no separate mouse "confirm" step the way Enter is
-    /// from the keyboard); in `Mode::Settings` it also starts editing
-    /// that field, but only when nothing else is already being edited.
+    /// it also asks which DNS server to query for that name immediately
+    /// (a click is one deliberate choice, with no separate mouse
+    /// "confirm" step the way Enter is from the keyboard); in
+    /// `Mode::Settings` it also starts editing that field, but only when
+    /// nothing else is already being edited.
     SelectIndex(usize),
     /// Scrolls the active pane's content, for panes whose content is
     /// taller than the terminal (a long SAN list, a large DNS zone's
