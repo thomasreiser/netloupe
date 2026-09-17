@@ -757,32 +757,22 @@ impl AppState {
                     .get(*selected)
                     .and_then(|n| Target::parse(&n.name).ok())
                 {
-                    // Reuses the current tab's resolver rather than asking
-                    // again: picking an alternative name found *while
-                    // already inspecting this host* is a quick cross-
-                    // reference, not the deliberate "start fresh" that
-                    // Ctrl+T's new-host flow is -- re-prompting here would
-                    // just be friction for the common case of wanting the
-                    // same (often custom, e.g. internal) resolver again.
-                    let resolver = self.active().and_then(|t| t.resolver);
-                    self.mode = Mode::Normal;
-                    self.open_tab(target, resolver, sender);
+                    self.mode = self.choose_resolver_mode(target);
                 }
             }
             (Mode::SelectAltName { names, selected }, Action::SelectIndex(i)) => {
                 if i < names.len() {
                     *selected = i;
                 }
-                // Reuses the same "open it" logic as InputSubmit: a click
-                // on a list row is one deliberate choice, not a two-step
-                // select-then-confirm the way keyboard navigation is.
+                // Reuses the same "ask, then open" flow as InputSubmit: a
+                // click on a list row is one deliberate choice, not a
+                // two-step select-then-confirm the way keyboard
+                // navigation is.
                 if let Some(target) = names
                     .get(*selected)
                     .and_then(|n| Target::parse(&n.name).ok())
                 {
-                    let resolver = self.active().and_then(|t| t.resolver);
-                    self.mode = Mode::Normal;
-                    self.open_tab(target, resolver, sender);
+                    self.mode = self.choose_resolver_mode(target);
                 }
             }
             (Mode::SelectAltName { .. }, Action::InputCancel) => self.mode = Mode::Normal,
@@ -895,10 +885,12 @@ impl AppState {
                     let i = tab.focused_link?;
                     self.clickable_spans.get(i).map(|s| s.target.clone())
                 }) {
-                    self.open_link(target, sender);
+                    self.mode = self.choose_resolver_mode(target);
                 }
             }
-            Action::OpenLink(target) => self.open_link(target, sender),
+            Action::OpenLink(target) => {
+                self.mode = self.choose_resolver_mode(target);
+            }
             Action::RerunPane => {
                 if self.current_pane() == Some(Pane::Ports) {
                     self.maybe_prompt_ports();
@@ -930,13 +922,6 @@ impl AppState {
             Action::CopyPane => {} // clipboard support is a later addition; no-op for now.
             _ => {}
         }
-    }
-
-    /// Opens a new tab for a hostname/IP clicked (or Enter-activated)
-    /// from the active pane's content -- see `Action::OpenLink`.
-    fn open_link(&mut self, target: Target, sender: &mpsc::Sender<CheckEvent>) {
-        let resolver = self.active().and_then(|t| t.resolver);
-        self.open_tab(target, resolver, sender);
     }
 
     /// Opens the alternative-hostname picker for the active tab, if it has
@@ -1394,6 +1379,13 @@ mod tests {
 
         state.handle_action(Action::OpenAltNames, &tx);
         state.handle_action(Action::SelectDown, &tx);
+        state.handle_action(Action::InputSubmit, &tx);
+
+        match &state.mode {
+            Mode::ChooseResolver { target, .. } => assert_eq!(target.display(), "example.net"),
+            _ => panic!("expected ChooseResolver mode"),
+        }
+
         state.handle_action(Action::InputSubmit, &tx);
 
         assert!(matches!(state.mode, Mode::Normal));
@@ -1971,7 +1963,8 @@ mod tests {
         assert_eq!(state.tabs[0].focused_link, Some(0), "clamped at the start");
     }
 
-    /// End-to-end: Enter opens whichever link currently has focus.
+    /// End-to-end: Enter asks which resolver to use for whichever link
+    /// currently has focus, then opens it once that's confirmed.
     #[tokio::test]
     async fn activate_focused_link_opens_a_new_tab() {
         let mut state = AppState::new(Config::default(), ProviderDb::default());
@@ -1983,13 +1976,23 @@ mod tests {
 
         state.handle_action(Action::ActivateFocusedLink, &tx);
 
+        match &state.mode {
+            Mode::ChooseResolver { target, .. } => {
+                assert_eq!(*target, Target::parse("9.9.9.9").unwrap())
+            }
+            _ => panic!("expected ChooseResolver mode"),
+        }
+
+        state.handle_action(Action::InputSubmit, &tx);
+
         assert_eq!(state.tabs.len(), 2, "should have opened a new tab");
         assert_eq!(state.tabs[1].target, Target::parse("9.9.9.9").unwrap());
     }
 
     /// End-to-end: clicking a hostname/IP found in the active pane's
-    /// content (see `ui::linkscan`) opens it, through the same
-    /// `decode_mouse` + `handle_action` path the real event loop uses.
+    /// content (see `ui::linkscan`) asks which resolver to use, through
+    /// the same `decode_mouse` + `handle_action` path the real event
+    /// loop uses, then opens it once that's confirmed.
     #[tokio::test]
     async fn clicking_a_pane_content_link_opens_it() {
         let mut state = AppState::new(Config::default(), ProviderDb::default());
@@ -2004,6 +2007,15 @@ mod tests {
             Action::OpenLink(Target::parse("example.com").unwrap())
         );
         state.handle_action(action, &tx);
+
+        match &state.mode {
+            Mode::ChooseResolver { target, .. } => {
+                assert_eq!(*target, Target::parse("example.com").unwrap())
+            }
+            _ => panic!("expected ChooseResolver mode"),
+        }
+
+        state.handle_action(Action::InputSubmit, &tx);
 
         assert_eq!(state.tabs.len(), 2);
         assert_eq!(state.tabs[1].target, Target::parse("example.com").unwrap());
