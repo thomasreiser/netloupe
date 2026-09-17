@@ -24,6 +24,7 @@ pub fn render(frame: &mut Frame, area: Rect, tab: &TabState) {
             Constraint::Length(6),
             Constraint::Min(0),
         ])
+        .spacing(1)
         .split(body);
 
     render_ping_summary(frame, chunks[0], tab);
@@ -127,7 +128,7 @@ fn render_sparkline(frame: &mut Frame, area: Rect, tab: &TabState) {
     }
     let title = if ping.paused { "RTT (paused)" } else { "RTT" };
     let block = theme::panel(title, theme::pane_accent(crate::app::Pane::PingTrace));
-    let inner = block.inner(area);
+    let inner = block.inner(area).inner(ratatui::layout::Margin::new(1, 0));
     frame.render_widget(block, area);
     frame.render_widget(
         crate::ui::widgets::sparkline::widget(&ping.samples, inner.width),
@@ -166,6 +167,7 @@ fn render_trace(frame: &mut Frame, area: Rect, tab: &TabState) {
             Constraint::Length(reason_height),
             Constraint::Min(0),
         ])
+        .spacing(1)
         .split(area);
 
     render_trace_summary(frame, chunks[0], trace);

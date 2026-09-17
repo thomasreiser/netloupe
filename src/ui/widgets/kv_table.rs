@@ -21,6 +21,38 @@ const COLUMN_SPACING: u16 = 1;
 /// their own row (SANs, long TXT/header values, ...) rather than being
 /// cut off at the terminal's edge.
 pub fn render(frame: &mut Frame, area: Rect, rows: &[(String, String)], scroll: u16) {
+    render_impl(frame, area, None, rows, scroll);
+}
+
+/// Same as [`render`], with a header row labeling the two columns, and
+/// the value column capped to a sane width -- for a table whose columns
+/// aren't self-evident from context the way most `kv_table` uses (a
+/// record type name, a cert field) already are, and whose values (so
+/// far: nameserver names) are short enough that stretching to fill a
+/// wide terminal would just strand the second column's header/values
+/// far to the right of the content, behind a large empty gap.
+pub fn render_with_header(
+    frame: &mut Frame,
+    area: Rect,
+    header: [&str; 2],
+    rows: &[(String, String)],
+    scroll: u16,
+) {
+    const MAX_TABLE_WIDTH: u16 = 60;
+    let area = Rect {
+        width: area.width.min(MAX_TABLE_WIDTH),
+        ..area
+    };
+    render_impl(frame, area, Some(header), rows, scroll);
+}
+
+fn render_impl(
+    frame: &mut Frame,
+    area: Rect,
+    header: Option<[&str; 2]>,
+    rows: &[(String, String)],
+    scroll: u16,
+) {
     let value_width = area.width.saturating_sub(KEY_WIDTH + COLUMN_SPACING).max(1) as usize;
 
     let table_rows: Vec<Row> = rows
@@ -43,10 +75,19 @@ pub fn render(frame: &mut Frame, area: Rect, rows: &[(String, String)], scroll: 
         })
         .collect();
 
-    let table = Table::new(
+    let mut table = Table::new(
         table_rows,
         [Constraint::Length(KEY_WIDTH), Constraint::Fill(1)],
     );
+    if let Some([a, b]) = header {
+        let style = Style::default()
+            .fg(theme::MUTED)
+            .add_modifier(Modifier::BOLD);
+        table = table.header(Row::new(vec![
+            Cell::from(a).style(style),
+            Cell::from(b).style(style),
+        ]));
+    }
 
     let mut state = TableState::default();
     let max_offset = rows.len().saturating_sub(1);
@@ -57,8 +98,9 @@ pub fn render(frame: &mut Frame, area: Rect, rows: &[(String, String)], scroll: 
 /// Greedy word-wrap into lines of at most `width` characters, hard-
 /// breaking any single "word" longer than that (SANs, long hex tokens,
 /// and the like rarely contain spaces at all, so this is the common
-/// case for the longest values).
-fn wrap(text: &str, width: usize) -> Vec<String> {
+/// case for the longest values). Shared with `widgets::record_table`,
+/// which wraps its own value column the same way.
+pub(super) fn wrap(text: &str, width: usize) -> Vec<String> {
     let width = width.max(1);
     let mut lines = Vec::new();
     let mut current = String::new();

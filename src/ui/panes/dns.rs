@@ -14,6 +14,18 @@ use crate::checks::dns::ZoneSigning;
 use crate::checks::CheckId;
 use crate::event::CheckUpdate;
 use crate::ui::theme;
+use crate::ui::widgets::record_table::RecordRow;
+
+/// A record's TTL as shown in a table cell: raw seconds with an "s"
+/// suffix, or "-" for a synthetic row or one with no TTL to show (see
+/// `DnsRecordRow::ttl`'s doc comment for why PTR is the one real record
+/// type that falls in the latter case).
+fn ttl_text(ttl: Option<u32>) -> String {
+    match ttl {
+        Some(t) => format!("{t}s"),
+        None => "-".to_string(),
+    }
+}
 
 pub fn render(frame: &mut Frame, area: Rect, tab: &TabState) {
     let body = header_and_body(frame, area, tab, &[CheckId::Dns]);
@@ -28,76 +40,105 @@ pub fn render(frame: &mut Frame, area: Rect, tab: &TabState) {
         return;
     };
 
-    let mut rows: Vec<(String, String)> = vec![(
-        "Resolver".to_string(),
-        if dns.resolver == "system" {
-            "system default".to_string()
-        } else {
-            dns.resolver.clone()
-        },
-    )];
-    for ip in &dns.a {
-        rows.push(("A".to_string(), ip.to_string()));
+    // Nameservers get their own section below, so they're excluded here
+    // rather than shown twice.
+    let mut record_rows: Vec<RecordRow> = Vec::new();
+    for record in dns.records.iter().filter(|r| r.record_type != "NS") {
+        record_rows.push(RecordRow {
+            record_type: record.record_type.to_string(),
+            value: record.value.clone(),
+            ttl: ttl_text(record.ttl),
+        });
     }
-    for ip in &dns.aaaa {
-        rows.push(("AAAA".to_string(), ip.to_string()));
-    }
-    for c in &dns.cnames {
-        rows.push(("CNAME".to_string(), c.clone()));
-    }
-    for mx in &dns.mx {
-        rows.push((
-            "MX".to_string(),
-            format!("{} {}", mx.preference, mx.exchange),
-        ));
-    }
-    for ns in &dns.ns {
-        rows.push(("NS".to_string(), ns.clone()));
-    }
-    if let Some(soa) = &dns.soa {
-        rows.push((
-            "SOA".to_string(),
-            format!("{} {} serial={}", soa.mname, soa.rname, soa.serial),
-        ));
-    }
-    for txt in &dns.txt {
-        rows.push(("TXT".to_string(), txt.clone()));
-    }
-    for caa in &dns.caa {
-        rows.push(("CAA".to_string(), caa.clone()));
-    }
-    for srv in &dns.srv {
-        rows.push(("SRV".to_string(), srv.clone()));
-    }
-    for ptr in &dns.ptr {
-        rows.push(("PTR".to_string(), ptr.clone()));
-    }
-    rows.push((
-        "DNSSEC (AD bit)".to_string(),
-        dns.authenticated_data.to_string(),
-    ));
+    record_rows.push(RecordRow {
+        record_type: "DNSSEC".to_string(),
+        value: format!("AD bit: {}", dns.authenticated_data),
+        ttl: "-".to_string(),
+    });
 
-    // Capped, not sized to fit every row: a zone with many records (or a
-    // long SAN-style list) would otherwise crowd the Discovery panel
-    // below out entirely. `tab.scroll` reaches whatever rows don't fit.
+    let ns_rows: Vec<(String, String)> = dns
+        .records
+        .iter()
+        .filter(|r| r.record_type == "NS")
+        .map(|r| (r.value.clone(), ttl_text(r.ttl)))
+        .collect();
+
+    // Both tables are capped, not sized to fit every row: a zone with
+    // many records (or many nameservers) would otherwise crowd the
+    // Discovery panel out entirely. `tab.scroll` reaches whatever rows
+    // don't fit in the main table; the nameservers list is short enough
+    // in practice (almost always well under 10) that it isn't wired to
+    // scroll separately.
     const MAX_TABLE_ROWS_SHOWN: u16 = 12;
-    let table_height = (rows.len() as u16 + 1)
+    const MAX_NS_ROWS_SHOWN: u16 = 6;
+    let ns_height = if ns_rows.is_empty() {
+        0
+    } else {
+        (ns_rows.len() as u16 + 3).min(MAX_NS_ROWS_SHOWN + 3)
+    };
+    let errors_height = dns.errors.len().min(4) as u16;
+    // Reserves room for everything else the layout below needs (the
+    // resolver line, the Nameservers section, the Discovery panel's own
+    // `Min(3)`, any errors, and the blank row `spacing(1)` puts between
+    // each of this layout's 5 regions -- 4 gaps) before capping the main
+    // table's height, against `body.height` (the pane's actual content
+    // area, already excluding the panel border and the status header)
+    // rather than the outer `area` -- otherwise, on a short terminal,
+    // the total requested height could exceed what's actually available
+    // and ratatui's layout solver would shrink the table itself to make
+    // room, potentially squeezing its header (and the TTL column with
+    // it) out entirely rather than just leaving fewer Discovery rows
+    // visible.
+    let reserved_for_others = 1 + ns_height + 3 + errors_height + 4;
+    let table_height = (record_rows.len() as u16 + 1)
         .min(MAX_TABLE_ROWS_SHOWN)
-        .min(area.height.saturating_sub(6));
+        .min(body.height.saturating_sub(reserved_for_others));
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
+            Constraint::Length(1),
             Constraint::Length(table_height),
+            Constraint::Length(ns_height),
             Constraint::Min(3),
-            Constraint::Length(dns.errors.len().min(4) as u16),
+            Constraint::Length(errors_height),
         ])
+        .spacing(1)
         .split(body);
 
-    crate::ui::widgets::kv_table::render(frame, chunks[0], &rows, tab.scroll);
-    render_discovery(frame, chunks[1], tab, dns);
-    if !dns.errors.is_empty() {
-        frame.render_widget(errors_widget(&dns.errors), chunks[2]);
+    let resolver_text = if dns.resolver == "system" {
+        "system default".to_string()
+    } else {
+        dns.resolver.clone()
+    };
+    frame.render_widget(
+        Line::from(vec![
+            label("Resolver"),
+            Span::styled(resolver_text, Style::default().fg(theme::TEXT)),
+        ]),
+        chunks[0],
+    );
+
+    crate::ui::widgets::record_table::render(frame, chunks[1], &record_rows, tab.scroll);
+    if !ns_rows.is_empty() {
+        render_nameservers(frame, chunks[2], &ns_rows);
     }
+    render_discovery(frame, chunks[3], tab, dns);
+    if !dns.errors.is_empty() {
+        frame.render_widget(errors_widget(&dns.errors), chunks[4]);
+    }
+}
+
+fn render_nameservers(frame: &mut Frame, area: Rect, ns_rows: &[(String, String)]) {
+    let block = theme::panel("Nameservers", theme::pane_accent(crate::app::Pane::Dns));
+    let inner = block.inner(area).inner(ratatui::layout::Margin::new(1, 0));
+    frame.render_widget(block, area);
+    crate::ui::widgets::kv_table::render_with_header(
+        frame,
+        inner,
+        ["NAMESERVER", "TTL"],
+        ns_rows,
+        0,
+    );
 }
 
 fn label(text: &'static str) -> Span<'static> {
@@ -116,7 +157,7 @@ fn render_discovery(
     dns: &crate::checks::dns::DnsResult,
 ) {
     let block = theme::panel("Discovery", theme::pane_accent(crate::app::Pane::Dns));
-    let inner = block.inner(area);
+    let inner = block.inner(area).inner(ratatui::layout::Margin::new(1, 0));
     frame.render_widget(block, area);
 
     let mut lines: Vec<Line> = Vec::new();
@@ -254,6 +295,16 @@ fn render_discovery(
                 lines.push(Line::from(Span::styled(
                     format!("  {name}"),
                     Style::default().fg(theme::MUTED),
+                )));
+            }
+            // Otherwise a walk that fails immediately (e.g. the zone
+            // doesn't actually enter the NSEC chain the way the DNSSEC
+            // probe that gated `w` suggested it would) looks identical
+            // to one that simply hasn't found anything yet.
+            for error in &walk.errors {
+                lines.push(Line::from(Span::styled(
+                    format!("  ⚠ {error}"),
+                    Style::default().fg(theme::RED),
                 )));
             }
         }

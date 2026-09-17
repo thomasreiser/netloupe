@@ -27,7 +27,7 @@ Guidance for Claude Code when working in this repository.
 | # | Pane | Content |
 |---|---|---|
 | 1 | Overview | Dashboard: IPs, ASN, provider badges, country, ping sparkline, cert expiry, SPF/DMARC/DNSSEC status |
-| 2 | DNS | A/AAAA/CNAME/MX/NS/SOA/TXT/CAA/SRV/PTR, DNSSEC chain, resolver comparison, delegation trace, AXFR/ANY attempts, NSEC/NSEC3 zone-signing detection, CT-log subdomains (reused from Alt. hosts), opt-in full NSEC zone walk |
+| 2 | DNS | A/AAAA/CNAME/MX/NS/SOA/TXT/CAA/SRV/PTR as a table with a TTL column, nameservers broken out into their own section (also with TTL), DNSSEC chain, resolver comparison, delegation trace, AXFR/ANY attempts, NSEC/NSEC3 zone-signing detection, CT-log subdomains (reused from Alt. hosts), opt-in full NSEC zone walk |
 | 3 | Mail | SPF (flattened, lookup count), DMARC, DKIM (common selectors), MTA-STS, TLS-RPT, BIMI, SMTP banner/STARTTLS |
 | 4 | Ping/Trace | ICMP + TCP ping with live sparkline, MTR-style traceroute with ASN/provider per hop |
 | 5 | Ports | Opt-in scan of a configurable port list, banners |
@@ -197,7 +197,7 @@ src/
     tabs.rs
     linkscan.rs        # Finds hostnames/IPs in rendered pane output, makes them clickable
     panes/             # one file per pane (overview.rs, dns.rs, hosting.rs, ...)
-    widgets/           # reusable widgets (sparkline, kv_table, status_badge, evidence_list, worldmap)
+    widgets/           # reusable widgets (sparkline, kv_table, record_table, status_badge, evidence_list, worldmap)
   checks/              # One module per check; no ratatui imports here
     mod.rs             # Check trait + registry
     dns.rs
@@ -303,7 +303,7 @@ Before finishing any task, run `cargo fmt`, `cargo clippy` (with no warnings), a
 Config lives at `$XDG_CONFIG_HOME/netloupe/config.toml`. Every option has a sensible default so the tool runs with no config file at all. It covers:
 - resolvers to use (the system resolver by default, plus a comparison set: 1.1.1.1, 8.8.8.8, 9.9.9.9)
 - **Per-tab custom DNS server.** Every new-tab flow (`Ctrl+t`, the alt-hostname picker, clicking a link in pane content) prompts for a DNS server via `Mode::ChooseResolver` before opening the tab, pre-filled with the last choice and, as placeholder text, this machine's actual resolver(s) (`checks::dns::system_resolver_ips`). Blank means the system's normal resolver; every check on that tab queries whatever was chosen, threaded through `checks::dns::DnsOpts`. `check <target> --resolver <ip>` is the headless equivalent.
-- **In-app settings editor** (`s`, see `src/settings.rs`): edits a curated subset of `Config` fields in place -- `↑`/`↓` selects, Enter edits and commits, Esc cancels. A committed field applies immediately and is written back to `config.toml` right away.
+- **In-app settings editor** (`s`, see `src/settings.rs`): edits a curated subset of `Config` fields in place -- `↑`/`↓` selects, Enter edits and commits, Esc cancels. The row being actively typed into gets its own highlight color (yellow, vs. cyan for a merely-selected row) and a cursor right after the in-progress value, distinct from ordinary navigation. A committed field applies immediately and is written back to `config.toml` right away.
 - timeouts per check type
 - the port list for scans
 - **GeoLite2 databases, downloaded automatically** once `[geoip].account_id`/`license_key` are set (`src/geoip.rs`, MaxMind's GeoIP Update API), cached under `$XDG_CACHE_HOME/netloupe/geoip/` and refreshed on `[geoip].update_interval`. `checks::geo` only ever reads that cache; headless `check` does too, but never triggers a download.

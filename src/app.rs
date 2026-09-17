@@ -1057,6 +1057,14 @@ impl AppState {
     /// possible) and hasn't already been asked this tab. A no-op
     /// otherwise: nothing to walk, or already answered.
     fn open_zone_walk_confirm(&mut self) {
+        // Its progress only ever renders in the DNS pane (see
+        // `ui::panes::dns`), so confirming from anywhere else would
+        // start the walk with nothing on screen to show it -- same
+        // restriction `maybe_prompt_ports` already applies to the Ports
+        // pane's confirm prompt.
+        if self.current_pane() != Some(Pane::Dns) {
+            return;
+        }
         let Some(tab) = self.active() else { return };
         if tab.zone_walk_confirmed.is_some() {
             return;
@@ -1454,6 +1462,22 @@ mod tests {
     /// checks themselves.
     fn local_target() -> Target {
         Target::parse("192.168.1.1").unwrap()
+    }
+
+    /// Marks the active tab's DNS check as done against an NSEC-signed
+    /// zone, the precondition `open_zone_walk_confirm` checks before
+    /// letting `w` do anything.
+    fn with_nsec_signed_dns_result(state: &mut AppState) {
+        state.tabs[0].checks.insert(
+            CheckId::Dns,
+            CheckSlot {
+                status: CheckStatus::Done,
+                update: Some(CheckUpdate::Dns(crate::checks::dns::DnsResult {
+                    zone_signing: crate::checks::dns::ZoneSigning::Nsec,
+                    ..Default::default()
+                })),
+            },
+        );
     }
 
     fn with_alt_names(state: &mut AppState, names: Vec<AltName>) {
@@ -2084,6 +2108,37 @@ mod tests {
 
         assert!(matches!(state.mode, Mode::Normal));
         assert_eq!(state.tabs[0].ports_confirmed, Some(true));
+    }
+
+    /// The zone walk's progress only ever renders in the DNS pane, so
+    /// `w` must be a no-op anywhere else -- otherwise confirming it
+    /// starts the walk with nothing on screen to show it.
+    #[tokio::test]
+    async fn open_zone_walk_confirm_is_a_no_op_outside_the_dns_pane() {
+        let mut state = AppState::new(Config::default(), ProviderDb::default());
+        let tx = test_sender();
+        state.open_tab(local_target(), None, &tx);
+        with_nsec_signed_dns_result(&mut state);
+
+        let overview_index = Pane::ALL.iter().position(|&p| p == Pane::Overview).unwrap();
+        state.handle_action(Action::SelectPane(overview_index), &tx);
+        state.handle_action(Action::OpenZoneWalk, &tx);
+
+        assert!(matches!(state.mode, Mode::Normal));
+    }
+
+    #[tokio::test]
+    async fn open_zone_walk_confirm_opens_the_prompt_on_the_dns_pane() {
+        let mut state = AppState::new(Config::default(), ProviderDb::default());
+        let tx = test_sender();
+        state.open_tab(local_target(), None, &tx);
+        with_nsec_signed_dns_result(&mut state);
+
+        let dns_index = Pane::ALL.iter().position(|&p| p == Pane::Dns).unwrap();
+        state.handle_action(Action::SelectPane(dns_index), &tx);
+        state.handle_action(Action::OpenZoneWalk, &tx);
+
+        assert!(matches!(state.mode, Mode::ConfirmZoneWalk));
     }
 
     /// End-to-end: clicking outside the "new host" prompt's popup must

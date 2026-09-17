@@ -101,10 +101,13 @@ pub fn render(frame: &mut Frame, area: Rect, tab: &TabState) {
     // space at all. Scrolling (via `tab.scroll`) reaches whatever rows
     // don't fit rather than losing them off-screen.
     let reserved_for_acme = if tls.acme.is_some() { 6 } else { 0 };
+    // + 2: the blank row `spacing(1)` puts between each of this
+    // layout's 3 regions.
     let max_table_height = body
         .height
         .saturating_sub(expiry_height)
         .saturating_sub(reserved_for_acme)
+        .saturating_sub(2)
         .max(3);
     let table_height = (rows.len() as u16 + 1).min(max_table_height);
     let chunks = Layout::default()
@@ -114,6 +117,7 @@ pub fn render(frame: &mut Frame, area: Rect, tab: &TabState) {
             Constraint::Length(table_height),
             Constraint::Min(0),
         ])
+        .spacing(1)
         .split(body);
 
     if let Some(days) = tls.days_until_expiry {
@@ -142,7 +146,9 @@ pub fn render(frame: &mut Frame, area: Rect, tab: &TabState) {
             "Certificate issuance",
             theme::pane_accent(crate::app::Pane::Tls),
         );
-        let inner = block.inner(chunks[2]);
+        let inner = block
+            .inner(chunks[2])
+            .inner(ratatui::layout::Margin::new(1, 0));
         frame.render_widget(block, chunks[2]);
         frame.render_widget(
             Paragraph::new(acme_lines(acme)).wrap(Wrap { trim: false }),

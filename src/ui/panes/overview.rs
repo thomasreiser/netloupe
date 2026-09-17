@@ -6,7 +6,7 @@
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Cell, Paragraph, Row, Table, TableState};
+use ratatui::widgets::{Cell, Paragraph, Row, Table, TableState, Wrap};
 use ratatui::Frame;
 
 use crate::app::TabState;
@@ -28,54 +28,99 @@ const OVERVIEW_CHECKS: &[CheckId] = &[
 pub fn render(frame: &mut Frame, area: Rect, tab: &TabState, show_country_flags: bool) {
     let body = super::header_and_body(frame, area, tab, OVERVIEW_CHECKS);
 
+    let target = target_lines(tab);
+    let network = network_lines(tab);
+    let hosting = hosting_lines(tab);
+    let security = security_lines(tab);
+    let location = location_lines(tab, show_country_flags);
+    let latency = latency_lines(tab);
+
+    // Each row's cards get exactly as much height as its tallest card's
+    // actual content needs (plus the card's own top/bottom border),
+    // rather than a fixed 50% of the pane regardless of terminal size --
+    // otherwise a card with 1-2 lines of content balloons into a mostly
+    // empty box on a tall terminal. `MIN_CARD_HEIGHT` keeps a
+    // near-empty card from looking cramped; leftover vertical space
+    // (often most of the pane, on a tall terminal) goes to Alternative
+    // Hostnames below instead, which can actually use more room for a
+    // longer name list.
+    const MIN_CARD_HEIGHT: u16 = 4;
+    const BORDER_OVERHEAD: u16 = 2;
+    let row_height = |cards: &[&[Line<'static>]]| -> u16 {
+        cards
+            .iter()
+            .map(|c| c.len() as u16)
+            .max()
+            .unwrap_or(0)
+            .max(MIN_CARD_HEIGHT)
+            + BORDER_OVERHEAD
+    };
+    let row1_height = row_height(&[&target, &network, &hosting]);
+    let row2_height = row_height(&[&security, &location, &latency]);
+
+    // Gaps stay at the minimum non-zero cell count on both axes --
+    // wide/tall enough to read as a gap rather than a seam, without
+    // eating further into the space `render_alt_names` gets below.
+    const ROW_GAP: u16 = 1;
+    const CARD_GAP: u16 = 1;
     let sections = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Percentage(62), Constraint::Min(5)])
+        .constraints([
+            Constraint::Length(row1_height + row2_height),
+            Constraint::Min(3),
+        ])
+        .spacing(ROW_GAP)
         .split(body);
     let rows = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .constraints([
+            Constraint::Length(row1_height),
+            Constraint::Length(row2_height),
+        ])
+        .spacing(ROW_GAP)
         .split(sections[0]);
     let top = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Ratio(1, 3); 3])
+        .spacing(CARD_GAP)
         .split(rows[0]);
     let bottom = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Ratio(1, 3); 3])
+        .spacing(CARD_GAP)
         .split(rows[1]);
 
     render_alt_names(frame, sections[1], tab);
 
-    card(frame, top[0], "TARGET", theme::CYAN, target_lines(tab));
-    card(frame, top[1], "NETWORK", theme::BLUE, network_lines(tab));
+    card(frame, top[0], "TARGET", theme::CYAN, target);
+    card(frame, top[1], "NETWORK", theme::BLUE, network);
     card(
         frame,
         top[2],
         "HOSTING",
         theme::pane_accent(crate::app::Pane::Hosting),
-        hosting_lines(tab),
+        hosting,
     );
     card(
         frame,
         bottom[0],
         "SECURITY",
         theme::pane_accent(crate::app::Pane::Mail),
-        security_lines(tab),
+        security,
     );
     card(
         frame,
         bottom[1],
         "LOCATION",
         theme::pane_accent(crate::app::Pane::Geo),
-        location_lines(tab, show_country_flags),
+        location,
     );
     card(
         frame,
         bottom[2],
         "LATENCY",
         theme::pane_accent(crate::app::Pane::PingTrace),
-        latency_lines(tab),
+        latency,
     );
 }
 
@@ -87,9 +132,9 @@ fn card(
     lines: Vec<Line<'static>>,
 ) {
     let block = theme::panel(title, accent);
-    let inner = block.inner(area);
+    let inner = block.inner(area).inner(ratatui::layout::Margin::new(1, 0));
     frame.render_widget(block, area);
-    frame.render_widget(Paragraph::new(lines), inner);
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
 
 fn kv(key: &str, value: impl Into<String>) -> Line<'static> {
@@ -321,7 +366,7 @@ fn render_alt_names(frame: &mut Frame, area: Rect, tab: &TabState) {
 
     let Some(CheckUpdate::AltNames(alt)) = &tab.slot(CheckId::AltNames).update else {
         let block = theme::panel(title, accent);
-        let inner = block.inner(area);
+        let inner = block.inner(area).inner(ratatui::layout::Margin::new(1, 0));
         frame.render_widget(block, area);
         frame.render_widget(
             super::empty_message("looking for other names pointing at the same destination..."),
@@ -332,7 +377,7 @@ fn render_alt_names(frame: &mut Frame, area: Rect, tab: &TabState) {
 
     if alt.names.is_empty() {
         let block = theme::panel(title, accent);
-        let inner = block.inner(area);
+        let inner = block.inner(area).inner(ratatui::layout::Margin::new(1, 0));
         frame.render_widget(block, area);
         frame.render_widget(
             super::empty_message(
@@ -349,7 +394,7 @@ fn render_alt_names(frame: &mut Frame, area: Rect, tab: &TabState) {
         theme::MUTED,
         accent,
     );
-    let inner = block.inner(area);
+    let inner = block.inner(area).inner(ratatui::layout::Margin::new(1, 0));
     frame.render_widget(block, area);
 
     // A real `Table` rather than manually padding a fixed-width string:
