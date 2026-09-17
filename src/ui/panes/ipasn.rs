@@ -12,7 +12,7 @@ use crate::checks::CheckId;
 use crate::event::CheckUpdate;
 use crate::ui::theme;
 
-pub fn render(frame: &mut Frame, area: Rect, tab: &TabState) {
+pub fn render(frame: &mut Frame, area: Rect, tab: &TabState, show_country_flags: bool) {
     let body = header_and_body(frame, area, tab, &[CheckId::IpInfo]);
     let slot = tab.slot(CheckId::IpInfo);
 
@@ -76,9 +76,10 @@ pub fn render(frame: &mut Frame, area: Rect, tab: &TabState) {
                     asn.as_name.clone().unwrap_or_else(|| "-".to_string()),
                 ));
                 rows.push(("Announced prefix".to_string(), asn.prefix.clone()));
+                let text = format!("{} ({})", asn.registry, asn.country);
                 rows.push((
                     "Registry".to_string(),
-                    format!("{} ({})", asn.registry, asn.country),
+                    theme::with_country_flag(&text, Some(&asn.country), show_country_flags),
                 ));
             }
             None => rows.push(("ASN".to_string(), "unknown".to_string())),
@@ -96,7 +97,12 @@ pub fn render(frame: &mut Frame, area: Rect, tab: &TabState) {
                 ));
                 rows.push((
                     "RDAP country".to_string(),
-                    rdap.country.clone().unwrap_or_else(|| "-".to_string()),
+                    match &rdap.country {
+                        Some(country) => {
+                            theme::with_country_flag(country, Some(country), show_country_flags)
+                        }
+                        None => "-".to_string(),
+                    },
                 ));
                 rows.push((
                     "Abuse contact".to_string(),

@@ -309,6 +309,7 @@ Config lives at `$XDG_CONFIG_HOME/netloupe/config.toml`. Every option has a sens
 - `[hosting]`: enabled providers, confidence thresholds, max data age before warning, and an extra signature directory for user-defined providers (e.g. an internal company IP range)
 - optional API keys for reputation providers
 - keybindings and color theme
+- `show_country_flags`: off by default, since regional-indicator flag emoji don't render everywhere (notably many Linux terminals, tmux, and SSH); `theme::with_country_flag` is the single place every pane showing a country goes through
 
 ## Keybindings (defaults)
 

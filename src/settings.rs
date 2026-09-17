@@ -188,6 +188,12 @@ pub fn fields() -> Vec<SettingField> {
                 Ok(())
             },
         },
+        SettingField {
+            label: "Country flags",
+            help: "yes/no -- a flag emoji next to country names/codes; needs terminal+font support",
+            get: |c| bool_get(c.show_country_flags),
+            set: |c, v| bool_set(v).map(|b| c.show_country_flags = b),
+        },
     ]
 }
 
@@ -222,6 +228,18 @@ fn duration_get(d: std::time::Duration) -> String {
 fn duration_set(v: &str) -> Result<std::time::Duration, String> {
     humantime::parse_duration(v.trim())
         .map_err(|e| format!("not a duration (try e.g. \"3s\" or \"800ms\"): {e}"))
+}
+
+fn bool_get(b: bool) -> String {
+    if b { "yes" } else { "no" }.to_string()
+}
+
+fn bool_set(v: &str) -> Result<bool, String> {
+    match v.trim().to_lowercase().as_str() {
+        "yes" | "y" | "true" | "on" => Ok(true),
+        "no" | "n" | "false" | "off" => Ok(false),
+        other => Err(format!("{other:?} isn't yes/no")),
+    }
 }
 
 fn confidence_set(v: &str) -> Result<Confidence, String> {
@@ -337,5 +355,14 @@ mod tests {
             ]
         );
         assert!(ip_list_set("1.1.1.1, not-an-ip").is_err());
+    }
+
+    #[test]
+    fn bool_set_is_case_insensitive_and_rejects_unknown_words() {
+        assert!(bool_set("yes").unwrap());
+        assert!(bool_set("On").unwrap());
+        assert!(!bool_set("no").unwrap());
+        assert!(!bool_set("Off").unwrap());
+        assert!(bool_set("maybe").is_err());
     }
 }

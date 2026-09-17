@@ -49,6 +49,12 @@ pub struct Config {
     pub reputation: ReputationConfig,
     pub keybindings: KeybindingConfig,
     pub theme: String,
+    /// Whether panes show a flag emoji (e.g. 🇩🇪) next to a country
+    /// name/code, in addition to the text itself. Off by default since
+    /// regional-indicator flag emoji render reliably only on some
+    /// terminals/fonts (notably not many Linux terminals, tmux, or over
+    /// SSH) -- see the settings editor's "Country flags" field.
+    pub show_country_flags: bool,
 }
 
 impl Default for Config {
@@ -62,6 +68,7 @@ impl Default for Config {
             reputation: ReputationConfig::default(),
             keybindings: KeybindingConfig::default(),
             theme: "default".to_string(),
+            show_country_flags: false,
         }
     }
 }

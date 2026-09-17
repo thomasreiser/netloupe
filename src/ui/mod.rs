@@ -72,7 +72,13 @@ pub fn draw(frame: &mut Frame, state: &AppState) {
     tabs::render_pane_tabs(frame, chunks[1], state);
 
     match state.active() {
-        Some(tab) => panes::render(frame, chunks[2], tab, &state.geoip),
+        Some(tab) => panes::render(
+            frame,
+            chunks[2],
+            tab,
+            &state.geoip,
+            state.config.show_country_flags,
+        ),
         None => frame.render_widget(
             Paragraph::new("No hosts open. Press Ctrl+t to add one.")
                 .style(Style::default().fg(theme::MUTED)),
@@ -1211,6 +1217,38 @@ mod tests {
         assert!(
             content.contains("Example CDN"),
             "expected the hosting detection to appear in the dashboard"
+        );
+    }
+
+    /// `Config::show_country_flags` gates a flag emoji next to a
+    /// country everywhere one's shown -- off by default, on once set,
+    /// in both the Overview dashboard's Country card and the Geo pane's
+    /// own table.
+    #[test]
+    fn country_flag_emoji_only_appears_when_enabled() {
+        let mut state = AppState::new(Config::default(), ProviderDb::default());
+        state.tabs.push(populated_tab());
+        state.tabs[0].active_pane = Pane::ALL.iter().position(|&p| p == Pane::Geo).unwrap();
+
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| draw(frame, &state)).unwrap();
+        let content = buffer_to_string(terminal.backend().buffer());
+        assert!(
+            !content.contains('🇺'),
+            "no flag should appear when show_country_flags is off"
+        );
+        assert!(content.contains("United States"));
+
+        state.config = std::sync::Arc::new(Config {
+            show_country_flags: true,
+            ..Config::default()
+        });
+        terminal.draw(|frame| draw(frame, &state)).unwrap();
+        let content = buffer_to_string(terminal.backend().buffer());
+        assert!(
+            content.contains("🇺🇸"),
+            "expected the US flag next to the country once enabled: {content}"
         );
     }
 

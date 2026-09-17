@@ -12,7 +12,13 @@ use crate::event::CheckUpdate;
 use crate::geoip::GeoipStatus;
 use crate::ui::theme;
 
-pub fn render(frame: &mut Frame, area: Rect, tab: &TabState, geoip: &GeoipStatus) {
+pub fn render(
+    frame: &mut Frame,
+    area: Rect,
+    tab: &TabState,
+    geoip: &GeoipStatus,
+    show_country_flags: bool,
+) {
     let body = header_and_body(frame, area, tab, &[CheckId::Geo]);
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -40,12 +46,13 @@ pub fn render(frame: &mut Frame, area: Rect, tab: &TabState, geoip: &GeoipStatus
         rows.push(("IP".to_string(), ip.to_string()));
     }
     if let Some(country) = &geo.country {
+        let text = format!(
+            "{country} ({})",
+            geo.country_code.clone().unwrap_or_default()
+        );
         rows.push((
             "Country".to_string(),
-            format!(
-                "{country} ({})",
-                geo.country_code.clone().unwrap_or_default()
-            ),
+            theme::with_country_flag(&text, geo.country_code.as_deref(), show_country_flags),
         ));
     }
     if let Some(region) = &geo.region {
