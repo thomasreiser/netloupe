@@ -576,6 +576,29 @@ fn resolver_for(ip: IpAddr, timeout: Duration) -> Result<TokioResolver, String> 
     builder.build().map_err(|e| e.to_string())
 }
 
+/// The distinct DNS server IPs configured on this machine (e.g.
+/// `/etc/resolv.conf`'s `nameserver` lines on Linux, or the active
+/// network service's servers on macOS/Windows), for display purposes
+/// only -- e.g. the `Mode::ChooseResolver` prompt shows these so leaving
+/// the field blank isn't a leap of faith about what "system default"
+/// actually resolves to. Empty when the system config can't be read;
+/// callers should fall back to a generic "system default" label rather
+/// than treating that as an error, since `system_resolver` above still
+/// works fine in that case -- it goes through `hickory-resolver`'s own
+/// system-config handling independently of this function.
+pub fn system_resolver_ips() -> Vec<IpAddr> {
+    let Ok((config, _)) = hickory_resolver::system_conf::read_system_conf() else {
+        return Vec::new();
+    };
+    let mut ips: Vec<IpAddr> = Vec::new();
+    for server in config.name_servers() {
+        if !ips.contains(&server.ip) {
+            ips.push(server.ip);
+        }
+    }
+    ips
+}
+
 /// Builds the resolver every plain lookup in this module (and, via the
 /// public `lookup_*`/`resolve_addrs` functions, every other check) goes
 /// through: the per-tab custom DNS server from `opts.resolver` when the

@@ -46,9 +46,10 @@ no API keys; reputation lookups use public DNSBLs and the Tor exit list,
 with AbuseIPDB as an optional extra if you configure a key.
 
 Opening a new host always asks which DNS server to query (blank for the
-system default); the same server is then used for every check on that
-tab, not just the DNS pane, and `check --resolver <ip>` is the headless
-equivalent.
+system default, shown as placeholder text so you can see what that
+actually means on this machine); the same server is then used for every
+check on that tab, not just the DNS pane, and `check --resolver <ip>` is
+the headless equivalent.
 
 Config lives at `$XDG_CONFIG_HOME/netloupe/config.toml` (all optional —
 see `Config` in `src/config.rs` for every field and its default).
