@@ -1,6 +1,6 @@
 //! Renders a `worldmap::MapGrid` (see `crate::worldmap`, which does all
 //! the actual projection/zoom/labeling logic) as styled text: coastline
-//! dots muted, country-border dots fainter still, the pinpoint bright and
+//! dots blue, country-border dots green, the pinpoint bright and
 //! unmistakable, city labels in plain readable text.
 
 use ratatui::style::{Modifier, Style};
@@ -22,11 +22,11 @@ pub fn widget(grid: &MapGrid) -> Paragraph<'static> {
                     col += 1;
                 }
                 Cell::Coast => {
-                    spans.push(Span::styled("·", Style::default().fg(theme::MUTED)));
+                    spans.push(Span::styled("·", Style::default().fg(theme::BLUE)));
                     col += 1;
                 }
                 Cell::Border => {
-                    spans.push(Span::styled("·", Style::default().fg(theme::FAINT)));
+                    spans.push(Span::styled("·", Style::default().fg(theme::GREEN)));
                     col += 1;
                 }
                 Cell::Pin => {
