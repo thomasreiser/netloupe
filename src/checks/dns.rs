@@ -15,7 +15,7 @@ use hickory_proto::rr::{Name, RData, Record, RecordType};
 use hickory_proto::serialize::binary::BinEncodable;
 use hickory_resolver::config::{NameServerConfig, ResolverConfig};
 use hickory_resolver::net::runtime::TokioRuntimeProvider;
-use hickory_resolver::net::{DnsError, NetError};
+use hickory_resolver::net::{DnsError, NetError, NoRecords};
 use hickory_resolver::{Resolver, TokioResolver};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -59,6 +59,23 @@ pub struct SoaRecord {
     pub minimum: u32,
 }
 
+/// The zone actually authoritative for the queried name, learned only
+/// when the name itself isn't a zone apex (e.g. `admin.ft.europe.example.com`
+/// under a zone cut at `example.com`) -- its name, SOA, and NS records.
+/// This is the same "AUTHORITY SECTION" `dig` shows in place of an answer
+/// for a non-apex name: RFC 2308's negative-response SOA, plus its NS
+/// records when the response already carried them (a delegation referral)
+/// or else a direct follow-up NS lookup against the zone's own name.
+/// `None` when the queried name is itself a zone apex, since `DnsResult`'s
+/// own `soa`/`ns` fields already cover it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthorityZone {
+    pub zone: String,
+    pub soa: SoaRecord,
+    /// Nameserver name paired with its TTL (seconds).
+    pub ns: Vec<(String, u32)>,
+}
+
 /// Everything the DNS check gathered for one target, from one resolver.
 #[derive(Debug, Clone, Default)]
 pub struct DnsResult {
@@ -73,6 +90,9 @@ pub struct DnsResult {
     pub ns: Vec<String>,
     pub txt: Vec<String>,
     pub soa: Option<SoaRecord>,
+    /// The enclosing zone's SOA/NS, when the queried name isn't itself a
+    /// zone apex -- see `AuthorityZone`'s doc comment.
+    pub authority: Option<AuthorityZone>,
     /// Rendered `tag value` pairs, e.g. `issue "letsencrypt.org"`.
     pub caa: Vec<String>,
     /// Rendered `priority weight port target`.
@@ -349,6 +369,23 @@ async fn fill_forward_records(resolver: &TokioResolver, name: &str, result: &mut
                     expire: soa.expire,
                     minimum: soa.minimum,
                 });
+            }
+        }
+        Err(NetError::Dns(DnsError::NoRecordsFound(no_records))) => {
+            if let Some(mut authority) = authority_zone_from_no_records(&no_records) {
+                if authority.ns.is_empty() {
+                    if let Ok(lookup) = resolver.ns_lookup(authority.zone.as_str()).await {
+                        authority.ns = lookup
+                            .answers()
+                            .iter()
+                            .filter_map(|r| match &r.data {
+                                RData::NS(ns) => Some((ns.0.to_string(), r.ttl)),
+                                _ => None,
+                            })
+                            .collect();
+                    }
+                }
+                result.authority = Some(authority);
             }
         }
         Err(err) => result.errors.push(format!("SOA: {err}")),
@@ -635,6 +672,42 @@ fn classify_forward_record(record: &Record, result: &mut DnsResult) {
     }
 }
 
+/// Extracts the enclosing zone's name, SOA, and any NS records already
+/// present in a negative SOA response's authority section (RFC 2308) --
+/// pure, so it's testable without a resolver. `no_records.ns` only ever
+/// carries NS records when the response was a delegation referral, not a
+/// plain NODATA; the common case leaves `ns` empty here, and
+/// `fill_forward_records`'s caller follows up with a direct `ns_lookup`
+/// against `zone` when that happens.
+fn authority_zone_from_no_records(no_records: &NoRecords) -> Option<AuthorityZone> {
+    let soa_record = no_records.soa.as_ref()?;
+    let zone = soa_record.name.to_string();
+    let soa = &soa_record.data;
+    let soa = SoaRecord {
+        mname: soa.mname.to_string(),
+        rname: soa.rname.to_string(),
+        serial: soa.serial,
+        refresh: soa.refresh,
+        retry: soa.retry,
+        expire: soa.expire,
+        minimum: soa.minimum,
+    };
+    let ns = no_records
+        .ns
+        .as_deref()
+        .map(|entries| {
+            entries
+                .iter()
+                .filter_map(|entry| match &entry.ns.data {
+                    RData::NS(ns) => Some((ns.0.to_string(), entry.ns.ttl)),
+                    _ => None,
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    Some(AuthorityZone { zone, soa, ns })
+}
+
 fn txt_to_string(txt: &hickory_proto::rr::rdata::TXT) -> String {
     txt.txt_data
         .iter()
@@ -857,7 +930,7 @@ mod tests {
 
     use hickory_proto::dnssec::rdata::nsec::NSEC;
     use hickory_proto::op::Query;
-    use hickory_resolver::net::NoRecords;
+    use hickory_resolver::net::{ForwardNSData, NoRecords};
 
     use super::*;
 
@@ -907,6 +980,82 @@ mod tests {
             classify_nsec_error(&NetError::Busy),
             ZoneSigning::NotSignedOrUnknown
         );
+    }
+
+    fn soa_no_records(zone: &str, ns_names: &[&str]) -> NoRecords {
+        use hickory_proto::rr::rdata::{self, SOA};
+
+        let mut no_records = NoRecords::new(
+            Box::new(Query::query(
+                Name::from_str("admin.ft.europe.example.com.").unwrap(),
+                RecordType::SOA,
+            )),
+            ResponseCode::NoError,
+        );
+        no_records.soa = Some(Box::new(Record::from_rdata(
+            Name::from_str(zone).unwrap(),
+            3600,
+            SOA::new(
+                Name::from_str(&format!("ns1.{zone}")).unwrap(),
+                Name::from_str(&format!("hostmaster.{zone}")).unwrap(),
+                2024010100,
+                3600,
+                600,
+                604800,
+                300,
+            ),
+        )));
+        if !ns_names.is_empty() {
+            no_records.ns = Some(
+                ns_names
+                    .iter()
+                    .map(|ns_name| ForwardNSData {
+                        ns: Record::from_rdata(
+                            Name::from_str(zone).unwrap(),
+                            86400,
+                            RData::NS(rdata::NS(Name::from_str(ns_name).unwrap())),
+                        ),
+                        glue: Vec::new().into(),
+                    })
+                    .collect(),
+            );
+        }
+        no_records
+    }
+
+    #[test]
+    fn authority_zone_from_no_records_extracts_the_soa() {
+        let no_records = soa_no_records("example.com.", &[]);
+        let authority = authority_zone_from_no_records(&no_records).unwrap();
+        assert_eq!(authority.zone, "example.com.");
+        assert_eq!(authority.soa.mname, "ns1.example.com.");
+        assert_eq!(authority.soa.serial, 2024010100);
+        assert!(authority.ns.is_empty());
+    }
+
+    #[test]
+    fn authority_zone_from_no_records_includes_ns_from_a_referral() {
+        let no_records = soa_no_records("example.com.", &["ns1.example.com.", "ns2.example.com."]);
+        let authority = authority_zone_from_no_records(&no_records).unwrap();
+        assert_eq!(
+            authority.ns,
+            vec![
+                ("ns1.example.com.".to_string(), 86400),
+                ("ns2.example.com.".to_string(), 86400),
+            ]
+        );
+    }
+
+    #[test]
+    fn authority_zone_from_no_records_is_none_without_an_soa() {
+        let no_records = NoRecords::new(
+            Box::new(Query::query(
+                Name::from_str("admin.ft.europe.example.com.").unwrap(),
+                RecordType::SOA,
+            )),
+            ResponseCode::NoError,
+        );
+        assert!(authority_zone_from_no_records(&no_records).is_none());
     }
 
     #[test]

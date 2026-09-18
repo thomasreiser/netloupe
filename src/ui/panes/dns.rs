@@ -63,6 +63,13 @@ pub fn render(frame: &mut Frame, area: Rect, tab: &TabState) {
         .map(|r| (r.value.clone(), ttl_text(r.ttl)))
         .collect();
 
+    // The queried name's own NS records above are empty exactly when it
+    // isn't a zone apex -- `dns.authority` then carries the enclosing
+    // zone's SOA/NS instead (see `checks::dns::AuthorityZone`), the same
+    // "AUTHORITY SECTION" `dig` shows in place of an answer. The two
+    // never both apply, so this slot renders whichever is present.
+    let authority = dns.authority.as_ref().filter(|_| ns_rows.is_empty());
+
     // Both tables are capped, not sized to fit every row: a zone with
     // many records (or many nameservers) would otherwise crowd the
     // Discovery panel out entirely. `tab.scroll` reaches whatever rows
@@ -71,10 +78,14 @@ pub fn render(frame: &mut Frame, area: Rect, tab: &TabState) {
     // scroll separately.
     const MAX_TABLE_ROWS_SHOWN: u16 = 12;
     const MAX_NS_ROWS_SHOWN: u16 = 6;
-    let ns_height = if ns_rows.is_empty() {
-        0
-    } else {
+    let ns_height = if !ns_rows.is_empty() {
         (ns_rows.len() as u16 + 3).min(MAX_NS_ROWS_SHOWN + 3)
+    } else if let Some(authority) = authority {
+        // +2 extra rows inside the panel for the "Zone"/"SOA" lines,
+        // above the NS sub-table's own header row and border.
+        (authority.ns.len() as u16 + 2 + 3).min(MAX_NS_ROWS_SHOWN + 5)
+    } else {
+        0
     };
     let errors_height = dns.errors.len().min(4) as u16;
     // Reserves room for everything else the layout below needs (the
@@ -121,6 +132,8 @@ pub fn render(frame: &mut Frame, area: Rect, tab: &TabState) {
     crate::ui::widgets::record_table::render(frame, chunks[1], &record_rows, tab.scroll);
     if !ns_rows.is_empty() {
         render_nameservers(frame, chunks[2], &ns_rows);
+    } else if let Some(authority) = authority {
+        render_authority(frame, chunks[2], authority);
     }
     render_discovery(frame, chunks[3], tab, dns);
     if !dns.errors.is_empty() {
@@ -139,6 +152,61 @@ fn render_nameservers(frame: &mut Frame, area: Rect, ns_rows: &[(String, String)
         ns_rows,
         0,
     );
+}
+
+/// The enclosing zone's SOA/NS for a queried name that isn't itself a
+/// zone apex -- shown in place of "Nameservers" (never both; see the
+/// `authority` filter in `render`) since the name's own NS lookup came
+/// back empty.
+fn render_authority(frame: &mut Frame, area: Rect, authority: &crate::checks::dns::AuthorityZone) {
+    let block = theme::panel("Authority", theme::pane_accent(crate::app::Pane::Dns));
+    let inner = block.inner(area).inner(ratatui::layout::Margin::new(1, 0));
+    frame.render_widget(block, area);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Min(1),
+        ])
+        .split(inner);
+
+    frame.render_widget(
+        Line::from(vec![
+            label("Zone"),
+            Span::styled(authority.zone.clone(), Style::default().fg(theme::TEXT)),
+        ]),
+        chunks[0],
+    );
+    frame.render_widget(
+        Line::from(vec![
+            label("SOA"),
+            Span::styled(
+                format!(
+                    "{} {} serial={}",
+                    authority.soa.mname, authority.soa.rname, authority.soa.serial
+                ),
+                Style::default().fg(theme::TEXT),
+            ),
+        ]),
+        chunks[1],
+    );
+
+    if !authority.ns.is_empty() {
+        let ns_rows: Vec<(String, String)> = authority
+            .ns
+            .iter()
+            .map(|(name, ttl)| (name.clone(), ttl_text(Some(*ttl))))
+            .collect();
+        crate::ui::widgets::kv_table::render_with_header(
+            frame,
+            chunks[2],
+            ["NAMESERVER", "TTL"],
+            &ns_rows,
+            0,
+        );
+    }
 }
 
 fn label(text: &'static str) -> Span<'static> {
