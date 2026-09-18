@@ -131,6 +131,7 @@ pub enum CheckUpdate {
     Ports(crate::checks::ports::PortsUpdate),
     AltNames(crate::checks::altnames::AltNamesResult),
     ZoneWalk(crate::checks::zonewalk::ZoneWalkResult),
+    Whois(crate::checks::whois::WhoisResult),
     /// A pane that hasn't been wired up to a real check yet.
     NotImplemented,
 }

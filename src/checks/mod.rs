@@ -20,6 +20,7 @@ pub mod ports;
 pub mod reputation;
 pub mod tls;
 pub mod trace;
+pub mod whois;
 pub mod zonewalk;
 
 use std::sync::Arc;
@@ -53,11 +54,14 @@ pub enum CheckId {
     /// Full NSEC zone walk; opt-in, offered from the DNS pane. See
     /// `checks::zonewalk`.
     ZoneWalk,
+    /// Domain registration info (RDAP, falling back to raw WHOIS); shown
+    /// in the DNS pane rather than a pane of its own. See `checks::whois`.
+    Whois,
 }
 
 impl CheckId {
     /// Every check, in the pane display order from `CLAUDE.md`.
-    pub const ALL: [CheckId; 13] = [
+    pub const ALL: [CheckId; 14] = [
         CheckId::Dns,
         CheckId::Mail,
         CheckId::Ping,
@@ -71,6 +75,7 @@ impl CheckId {
         CheckId::Reputation,
         CheckId::AltNames,
         CheckId::ZoneWalk,
+        CheckId::Whois,
     ];
 
     pub fn label(self) -> &'static str {
@@ -88,6 +93,7 @@ impl CheckId {
             CheckId::Reputation => "Rep",
             CheckId::AltNames => "Alt. names",
             CheckId::ZoneWalk => "Zone walk",
+            CheckId::Whois => "WHOIS",
         }
     }
 
@@ -423,6 +429,18 @@ impl Check for ZoneWalkCheck {
     }
 }
 
+struct WhoisCheck;
+
+#[async_trait]
+impl Check for WhoisCheck {
+    fn id(&self) -> CheckId {
+        CheckId::Whois
+    }
+    async fn run(&self, ctx: CheckContext, tx: mpsc::Sender<CheckEvent>) {
+        whois::run(ctx, tx).await
+    }
+}
+
 /// Every check netloupe knows about. `app.rs` spawns one from this list per
 /// tab for every check that isn't [`CheckId::requires_opt_in`]; opt-in
 /// checks are spawned only after the user confirms.
@@ -441,5 +459,6 @@ pub fn registry() -> Vec<Box<dyn Check>> {
         Box::new(ReputationCheck),
         Box::new(AltNamesCheck),
         Box::new(ZoneWalkCheck),
+        Box::new(WhoisCheck),
     ]
 }

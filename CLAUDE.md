@@ -27,7 +27,7 @@ Guidance for Claude Code when working in this repository.
 | # | Pane | Content |
 |---|---|---|
 | 1 | Overview | Dashboard: IPs, ASN, provider badges, country, ping sparkline, cert expiry, SPF/DMARC/DNSSEC status |
-| 2 | DNS | A/AAAA/CNAME/MX/NS/SOA/TXT/CAA/SRV/PTR as a table with a TTL column, nameservers broken out into their own section (also with TTL) -- or, for a name that isn't itself a zone apex, an "Authority" section showing the enclosing zone's own SOA/NS instead (RFC 2308's negative-response authority section, the same one `dig` shows in place of an answer), DNSSEC chain, resolver comparison, delegation trace, AXFR/ANY attempts, NSEC/NSEC3 zone-signing detection, CT-log subdomains (reused from Alt. hosts), opt-in full NSEC zone walk |
+| 2 | DNS | A/AAAA/CNAME/MX/NS/SOA/TXT/CAA/SRV/PTR as a table with a TTL column, nameservers broken out into their own section (also with TTL) -- or, for a name that isn't itself a zone apex, an "Authority" section showing the enclosing zone's own SOA/NS instead (RFC 2308's negative-response authority section, the same one `dig` shows in place of an answer), DNSSEC chain, resolver comparison, WHOIS/RDAP domain registration info (registrar, dates, status codes), a `dig +trace`-style delegation walk from the root down to the authoritative server, AXFR/ANY attempts, NSEC/NSEC3 zone-signing detection, CT-log subdomains (reused from Alt. hosts), opt-in full NSEC zone walk |
 | 3 | Mail | SPF (flattened, lookup count), DMARC, DKIM (common selectors), MTA-STS, TLS-RPT, BIMI, SMTP banner/STARTTLS |
 | 4 | Ping/Trace | ICMP + TCP ping with live sparkline, MTR-style traceroute with ASN/provider per hop |
 | 5 | Ports | Opt-in scan of a configurable port list, banners |
