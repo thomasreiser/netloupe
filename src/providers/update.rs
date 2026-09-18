@@ -109,7 +109,21 @@ pub async fn update_all(
 
         for (index, source) in ranges.sources.iter().enumerate() {
             let filename = source_filename(&loaded_sig.signature.id, index, source.format);
-            refresh_one(&client, cache_dir, &filename, &source.url, &mut report).await;
+            let url = if is_azure_download_page(&source.url) {
+                match resolve_azure_download_url(&client, &source.url).await {
+                    Ok(url) => url,
+                    Err(err) => {
+                        report.failed.push((
+                            filename,
+                            format!("resolving the Microsoft download link: {err}"),
+                        ));
+                        continue;
+                    }
+                }
+            } else {
+                source.url.clone()
+            };
+            refresh_one(&client, cache_dir, &filename, &url, &mut report).await;
         }
     }
 
@@ -344,6 +358,59 @@ pub fn list_cached_files(
     files
 }
 
+/// Whether `url` is a Microsoft Download Center page rather than a
+/// direct file link -- true only for Azure's "IP Ranges and Service
+/// Tags" source, the one entry in `data/providers/*.toml` configured
+/// this way (see its doc comment and `resolve_azure_download_url`).
+fn is_azure_download_page(url: &str) -> bool {
+    url.contains("microsoft.com") && url.contains("/download/details.aspx")
+}
+
+/// Resolves the Microsoft Download Center confirmation page at `page_url`
+/// to today's actual `.json` download link. Azure's "IP Ranges and
+/// Service Tags" list is published under a dated filename that changes
+/// every week (e.g. `ServiceTags_Public_20240415.json`), so the signature
+/// file can only point at the stable landing page, not the file itself --
+/// fetching that page directly as JSON is what previously produced
+/// "invalid JSON: expected value at line 1 column 1". This fetches the
+/// page's HTML and pulls the real link out of it before `refresh_one`'s
+/// normal ETag/If-Modified-Since fetch runs against that resolved URL.
+async fn resolve_azure_download_url(
+    client: &reqwest::Client,
+    page_url: &str,
+) -> Result<String, String> {
+    retry::run(&retry::Policy::default(), || async {
+        let response = client
+            .get(page_url)
+            .send()
+            .await
+            .map_err(retry::classify_send_error)?;
+        if !response.status().is_success() {
+            return Err(retry::classify_status(response.status()));
+        }
+        let html = response
+            .text()
+            .await
+            .map_err(|e| Failure::Retryable(e.to_string()))?;
+        extract_azure_json_link(&html).ok_or_else(|| {
+            Failure::Fatal(
+                "could not find a .json download link on the Microsoft download page".to_string(),
+            )
+        })
+    })
+    .await
+}
+
+/// Pulls the actual `.json` download link out of the Download Center
+/// page's HTML -- kept separate from the network fetch above so it's
+/// unit-testable without a live request.
+fn extract_azure_json_link(html: &str) -> Option<String> {
+    let pattern = r#"https://download\.microsoft\.com/download/[^"'\s]+?\.json"#;
+    let re =
+        regex::Regex::new(pattern).expect("a fixed, valid regex literal never fails to compile");
+    re.find(html).map(|m| m.as_str().to_string())
+}
+
 /// What one fetch attempt found, short of an outright failure: either the
 /// source hasn't changed (a 304, itself a successful outcome, not
 /// something to retry) or a fresh body to write.
@@ -521,5 +588,35 @@ mod tests {
     fn list_cached_files_is_empty_for_an_empty_cache_dir() {
         let dir = tempfile::tempdir().unwrap();
         assert!(list_cached_files(None, dir.path()).is_empty());
+    }
+
+    #[test]
+    fn is_azure_download_page_matches_only_the_configured_download_center_url() {
+        assert!(is_azure_download_page(
+            "https://www.microsoft.com/en-us/download/details.aspx?id=56519"
+        ));
+        assert!(!is_azure_download_page(
+            "https://download.microsoft.com/download/7/1/d/71d86715-5596-4529-9b13-da13a5de5b63/ServiceTags_Public_20240415.json"
+        ));
+        assert!(!is_azure_download_page("https://www.cloudflare.com/ips-v4"));
+    }
+
+    #[test]
+    fn extract_azure_json_link_finds_the_real_download_url_in_the_page_html() {
+        let html = r#"
+            <html><body>
+            <p>Some other link: <a href="https://www.microsoft.com/other">here</a></p>
+            <a id="downloadLink" href="https://download.microsoft.com/download/7/1/d/71d86715-5596-4529-9b13-da13a5de5b63/ServiceTags_Public_20240415.json" data-bi-id="downloadretry">Download</a>
+            </body></html>
+        "#;
+        assert_eq!(
+            extract_azure_json_link(html).as_deref(),
+            Some("https://download.microsoft.com/download/7/1/d/71d86715-5596-4529-9b13-da13a5de5b63/ServiceTags_Public_20240415.json")
+        );
+    }
+
+    #[test]
+    fn extract_azure_json_link_is_none_when_the_page_has_no_matching_link() {
+        assert!(extract_azure_json_link("<html><body>no links here</body></html>").is_none());
     }
 }
