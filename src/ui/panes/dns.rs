@@ -43,8 +43,8 @@ pub fn render(frame: &mut Frame, area: Rect, tab: &TabState) {
     // The zone tree gets a fixed right-hand column on any reasonably wide
     // terminal; a narrower one just keeps the pane's full width for its
     // main content, the same as before this section existed.
-    const TREE_WIDTH: u16 = 32;
-    const MIN_WIDTH_FOR_TREE: u16 = 90;
+    const TREE_WIDTH: u16 = 48;
+    const MIN_WIDTH_FOR_TREE: u16 = 110;
     let (body, tree_area) = if body.width >= MIN_WIDTH_FOR_TREE {
         let split = Layout::default()
             .direction(Direction::Horizontal)
@@ -557,19 +557,26 @@ fn render_whois(lines: &mut Vec<Line<'static>>, tab: &TabState) {
             ),
         ]));
     }
-    if info.created.is_some() || info.expires.is_some() || info.updated.is_some() {
-        let text = [
-            info.created.as_deref().map(|d| format!("created {d}")),
-            info.expires.as_deref().map(|d| format!("expires {d}")),
-            info.updated.as_deref().map(|d| format!("updated {d}")),
-        ]
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>()
-        .join("  ·  ");
+    // One row per date rather than combining them onto a single line:
+    // two full RFC 3339 timestamps plus labels easily overflows the
+    // Discovery panel's width (it doesn't wrap), which would otherwise
+    // silently clip whichever date came last.
+    if let Some(created) = &info.created {
         lines.push(Line::from(vec![
-            label("Registered"),
-            Span::styled(text, Style::default().fg(theme::TEXT)),
+            label("Created"),
+            Span::styled(created.clone(), Style::default().fg(theme::TEXT)),
+        ]));
+    }
+    if let Some(expires) = &info.expires {
+        lines.push(Line::from(vec![
+            label("Expires"),
+            Span::styled(expires.clone(), Style::default().fg(theme::TEXT)),
+        ]));
+    }
+    if let Some(updated) = &info.updated {
+        lines.push(Line::from(vec![
+            label("Updated"),
+            Span::styled(updated.clone(), Style::default().fg(theme::TEXT)),
         ]));
     }
     if !info.statuses.is_empty() {

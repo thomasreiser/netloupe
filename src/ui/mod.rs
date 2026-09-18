@@ -1976,7 +1976,7 @@ mod tests {
             "expected the registrar name to be visible: {content}"
         );
         assert!(
-            content.contains("expires 2026-08-13T04:00:00Z"),
+            content.contains("2026-08-13T04:00:00Z"),
             "expected the expiry date to be visible: {content}"
         );
     }
