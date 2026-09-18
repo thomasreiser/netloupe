@@ -81,8 +81,13 @@ impl PingUpdate {
 
 /// How many recent samples the sparkline/stats keep; older ones roll off
 /// as new ones arrive so a long-running tab's `PingUpdate` stays bounded.
-/// At `PING_INTERVAL` below, 120 samples is ~84 seconds of history.
-const MAX_SAMPLES_KEPT: usize = 120;
+/// Chosen to comfortably outlast even a very wide terminal's sparkline
+/// (one column per sample -- see `widgets::sparkline`): a low cap here
+/// means the bar chart stops advancing, and looks visually "stuck" well
+/// short of the pane's actual width, long before the window is remotely
+/// full. At `PING_INTERVAL` below, 600 samples is ~7 minutes of history,
+/// at a few hundred bytes of memory -- negligible either way.
+const MAX_SAMPLES_KEPT: usize = 600;
 const PING_INTERVAL: Duration = Duration::from_millis(700);
 
 pub(crate) async fn run(ctx: CheckContext, tx: mpsc::Sender<CheckEvent>) {
