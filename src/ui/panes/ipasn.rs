@@ -29,17 +29,28 @@ pub fn render(frame: &mut Frame, area: Rect, tab: &TabState, show_country_flags:
     };
 
     let is_global = info.class.is_global();
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(if is_global { 0 } else { 1 }),
-            Constraint::Min(0),
-            Constraint::Length(info.errors.len().min(4) as u16),
-        ])
-        .spacing(1)
-        .split(body);
-
-    if !is_global {
+    let errors_height = info.errors.len().min(4) as u16;
+    // A separate layout per branch, not a shared one with the local-
+    // address line's `Length` zeroed out for the (common) global-IP case:
+    // `.spacing(1)` still budgets a gap around a zero-height region, which
+    // left a stray blank line above the table for every global IP.
+    let (table_area, errors_area) = if is_global {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(0), Constraint::Length(errors_height)])
+            .spacing(1)
+            .split(body);
+        (chunks[0], chunks[1])
+    } else {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(1),
+                Constraint::Min(0),
+                Constraint::Length(errors_height),
+            ])
+            .spacing(1)
+            .split(body);
         frame.render_widget(
             Paragraph::new(Line::from(vec![
                 Span::styled("◆ ", Style::default().fg(theme::BLUE)),
@@ -56,7 +67,8 @@ pub fn render(frame: &mut Frame, area: Rect, tab: &TabState, show_country_flags:
             ])),
             chunks[0],
         );
-    }
+        (chunks[1], chunks[2])
+    };
 
     let mut rows: Vec<(String, String)> = vec![
         ("IP".to_string(), info.ip.to_string()),
@@ -119,8 +131,8 @@ pub fn render(frame: &mut Frame, area: Rect, tab: &TabState, show_country_flags:
         rows.push(("RDAP".to_string(), "n/a — local address".to_string()));
     }
 
-    crate::ui::widgets::kv_table::render(frame, chunks[1], &rows, tab.scroll);
+    crate::ui::widgets::kv_table::render(frame, table_area, &rows, tab.scroll);
     if !info.errors.is_empty() {
-        frame.render_widget(errors_widget(&info.errors), chunks[2]);
+        frame.render_widget(errors_widget(&info.errors), errors_area);
     }
 }
