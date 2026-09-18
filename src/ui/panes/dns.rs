@@ -81,9 +81,10 @@ pub fn render(frame: &mut Frame, area: Rect, tab: &TabState) {
     let ns_height = if !ns_rows.is_empty() {
         (ns_rows.len() as u16 + 3).min(MAX_NS_ROWS_SHOWN + 3)
     } else if let Some(authority) = authority {
-        // +2 extra rows inside the panel for the "Zone"/"SOA" lines,
-        // above the NS sub-table's own header row and border.
-        (authority.ns.len() as u16 + 2 + 3).min(MAX_NS_ROWS_SHOWN + 5)
+        // +3 extra rows inside the panel for the "Zone"/"SOA" lines and
+        // the blank row separating them from the NS sub-table, which
+        // itself adds its own header row and border (+3).
+        (authority.ns.len() as u16 + 3 + 3).min(MAX_NS_ROWS_SHOWN + 6)
     } else {
         0
     };
@@ -163,9 +164,13 @@ fn render_authority(frame: &mut Frame, area: Rect, authority: &crate::checks::dn
     let inner = block.inner(area).inner(ratatui::layout::Margin::new(1, 0));
     frame.render_widget(block, area);
 
+    // The blank row at index 2 is a deliberate gap before the NS
+    // sub-table -- it sets the SOA (a single, dense fact) visually apart
+    // from the table of nameservers below.
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
+            Constraint::Length(1),
             Constraint::Length(1),
             Constraint::Length(1),
             Constraint::Min(1),
@@ -201,7 +206,7 @@ fn render_authority(frame: &mut Frame, area: Rect, authority: &crate::checks::dn
             .collect();
         crate::ui::widgets::kv_table::render_with_header(
             frame,
-            chunks[2],
+            chunks[3],
             ["NAMESERVER", "TTL"],
             &ns_rows,
             0,

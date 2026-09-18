@@ -1748,6 +1748,43 @@ mod tests {
         );
     }
 
+    /// The Nameservers section's first column holds real nameserver
+    /// names, not short labels -- a name past `kv_table`'s old 22-column
+    /// label width (a common enough length for a real FQDN) must not get
+    /// silently truncated.
+    #[test]
+    fn dns_pane_does_not_truncate_a_long_nameserver_name() {
+        let mut state = AppState::new(Config::default(), ProviderDb::default());
+        let mut tab = empty_tab(1, "example.com");
+        tab.active_pane = Pane::ALL.iter().position(|&p| p == Pane::Dns).unwrap();
+        tab.checks.insert(
+            CheckId::Dns,
+            CheckSlot {
+                status: CheckStatus::Done,
+                update: Some(CheckUpdate::Dns(crate::checks::dns::DnsResult {
+                    resolver: "system".to_string(),
+                    records: vec![crate::checks::dns::DnsRecordRow {
+                        record_type: "NS",
+                        value: "arnold.ns.cloudflare.com.".to_string(),
+                        ttl: Some(20655),
+                    }],
+                    ..Default::default()
+                })),
+            },
+        );
+        state.tabs.push(tab);
+
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| draw(frame, &state)).unwrap();
+
+        let content = buffer_to_string(terminal.backend().buffer());
+        assert!(
+            content.contains("arnold.ns.cloudflare.com."),
+            "expected the full nameserver name, not a truncated prefix: {content:?}"
+        );
+    }
+
     /// A global (publicly routable) IP skips the "not publicly routable"
     /// banner line entirely -- that line's region must not still budget a
     /// layout gap for a line that's never rendered, or the table ends up

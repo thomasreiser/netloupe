@@ -9,7 +9,16 @@ use ratatui::Frame;
 
 use crate::ui::theme;
 
+/// The key column's width for plain [`render`], where it's always a
+/// short label ("IP", "Announced prefix", ...) that comfortably fits.
 const KEY_WIDTH: u16 = 22;
+/// The key column's width for [`render_with_header`], whose first column
+/// (so far: nameserver names) is real data rather than a label and can
+/// run well past `KEY_WIDTH` -- wide enough that a typical FQDN doesn't
+/// wrap, leaving the rest of the (already width-capped) row for the
+/// second column, which only ever needs a handful of characters (e.g. a
+/// TTL).
+const HEADER_KEY_WIDTH: u16 = 48;
 const COLUMN_SPACING: u16 = 1;
 
 /// Renders the table scrolled so row `scroll` is the first one shown —
@@ -21,7 +30,7 @@ const COLUMN_SPACING: u16 = 1;
 /// their own row (SANs, long TXT/header values, ...) rather than being
 /// cut off at the terminal's edge.
 pub fn render(frame: &mut Frame, area: Rect, rows: &[(String, String)], scroll: u16) {
-    render_impl(frame, area, None, rows, scroll);
+    render_impl(frame, area, None, KEY_WIDTH, rows, scroll);
 }
 
 /// Same as [`render`], with a header row labeling the two columns, and
@@ -43,31 +52,46 @@ pub fn render_with_header(
         width: area.width.min(MAX_TABLE_WIDTH),
         ..area
     };
-    render_impl(frame, area, Some(header), rows, scroll);
+    render_impl(frame, area, Some(header), HEADER_KEY_WIDTH, rows, scroll);
 }
 
 fn render_impl(
     frame: &mut Frame,
     area: Rect,
     header: Option<[&str; 2]>,
+    key_width: u16,
     rows: &[(String, String)],
     scroll: u16,
 ) {
-    let value_width = area.width.saturating_sub(KEY_WIDTH + COLUMN_SPACING).max(1) as usize;
+    // Clamped to the area, not just used as-is: a narrow terminal could
+    // otherwise ask for a key column wider than the whole table.
+    let key_width = key_width.min(area.width.saturating_sub(COLUMN_SPACING + 1).max(1));
+    let value_width = area.width.saturating_sub(key_width + COLUMN_SPACING).max(1) as usize;
 
     let table_rows: Vec<Row> = rows
         .iter()
         .map(|(k, v)| {
-            let wrapped = wrap(v, value_width);
-            let height = wrapped.len() as u16;
+            // The key column wraps the same way the value column does --
+            // it isn't always a short label (`render_with_header`'s
+            // nameserver names can run long), so silently truncating it
+            // would misrepresent the actual name.
+            let wrapped_key = wrap(k, key_width as usize);
+            let wrapped_value = wrap(v, value_width);
+            let height = wrapped_key.len().max(wrapped_value.len()) as u16;
             Row::new(vec![
-                Cell::from(k.as_str()).style(
+                Cell::from(Text::from(
+                    wrapped_key.into_iter().map(Line::from).collect::<Vec<_>>(),
+                ))
+                .style(
                     Style::default()
                         .fg(theme::LABEL)
                         .add_modifier(Modifier::BOLD),
                 ),
                 Cell::from(Text::from(
-                    wrapped.into_iter().map(Line::from).collect::<Vec<_>>(),
+                    wrapped_value
+                        .into_iter()
+                        .map(Line::from)
+                        .collect::<Vec<_>>(),
                 ))
                 .style(Style::default().fg(theme::TEXT)),
             ])
@@ -77,7 +101,7 @@ fn render_impl(
 
     let mut table = Table::new(
         table_rows,
-        [Constraint::Length(KEY_WIDTH), Constraint::Fill(1)],
+        [Constraint::Length(key_width), Constraint::Fill(1)],
     );
     if let Some([a, b]) = header {
         let style = Style::default()
