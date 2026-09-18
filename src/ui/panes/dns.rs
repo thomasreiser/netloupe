@@ -28,7 +28,7 @@ fn ttl_text(ttl: Option<u32>) -> String {
 }
 
 pub fn render(frame: &mut Frame, area: Rect, tab: &TabState) {
-    let body = header_and_body(frame, area, tab, &[CheckId::Dns]);
+    let body = header_and_body(frame, area, tab, &[CheckId::Dns, CheckId::Whois]);
     let slot = tab.slot(CheckId::Dns);
 
     let Some(CheckUpdate::Dns(dns)) = &slot.update else {
@@ -402,10 +402,82 @@ fn render_discovery(
         _ => {}
     }
 
+    render_whois(&mut lines, tab);
     render_delegation_trace(&mut lines, dns);
 
     let scroll = super::clamp_scroll(tab.scroll, lines.len(), inner.height);
     frame.render_widget(Paragraph::new(lines).scroll((scroll, 0)), inner);
+}
+
+/// The domain's registration info (registrar, dates, status codes) --
+/// from `CheckId::Whois`, a separate check reused here the same way
+/// `CheckId::AltNames` feeds the CT log line above, since it's not a
+/// pane of its own.
+fn render_whois(lines: &mut Vec<Line<'static>>, tab: &TabState) {
+    let slot = tab.slot(CheckId::Whois);
+    let Some(CheckUpdate::Whois(whois)) = &slot.update else {
+        if is_waiting(&slot.status) {
+            lines.push(Line::from(vec![
+                label("WHOIS"),
+                Span::styled("looking up…", Style::default().fg(theme::MUTED)),
+            ]));
+        }
+        return;
+    };
+
+    let Some(info) = &whois.info else {
+        // Both RDAP and WHOIS failed outright -- rare, but worth a single
+        // line rather than silently showing nothing.
+        if let Some(err) = whois.errors.last() {
+            lines.push(Line::from(vec![
+                label("WHOIS"),
+                Span::styled(err.clone(), Style::default().fg(theme::MUTED)),
+            ]));
+        }
+        return;
+    };
+
+    let source_note = match &info.source {
+        crate::checks::whois::WhoisSource::Rdap => String::new(),
+        crate::checks::whois::WhoisSource::Whois(server) => format!(" (via WHOIS: {server})"),
+    };
+
+    if let Some(registrar) = &info.registrar {
+        lines.push(Line::from(vec![
+            label("Registrar"),
+            Span::styled(
+                format!("{registrar}{source_note}"),
+                Style::default().fg(theme::TEXT),
+            ),
+        ]));
+    }
+    if info.created.is_some() || info.expires.is_some() || info.updated.is_some() {
+        let text = [
+            info.created.as_deref().map(|d| format!("created {d}")),
+            info.expires.as_deref().map(|d| format!("expires {d}")),
+            info.updated.as_deref().map(|d| format!("updated {d}")),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join("  ·  ");
+        lines.push(Line::from(vec![
+            label("Registered"),
+            Span::styled(text, Style::default().fg(theme::TEXT)),
+        ]));
+    }
+    if !info.statuses.is_empty() {
+        lines.push(Line::from(vec![
+            label("Status"),
+            Span::styled(info.statuses.join(", "), Style::default().fg(theme::TEXT)),
+        ]));
+    }
+    if let Some(org) = &info.registrant_org {
+        lines.push(Line::from(vec![
+            label("Registrant"),
+            Span::styled(org.clone(), Style::default().fg(theme::TEXT)),
+        ]));
+    }
 }
 
 /// A `dig +trace`-style delegation walk, appended below Discovery's other

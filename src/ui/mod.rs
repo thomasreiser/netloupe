@@ -1933,6 +1933,54 @@ mod tests {
         );
     }
 
+    #[test]
+    fn dns_pane_shows_whois_registration_info() {
+        let mut state = AppState::new(Config::default(), ProviderDb::default());
+        let mut tab = empty_tab(1, "example.com");
+        tab.active_pane = Pane::ALL.iter().position(|&p| p == Pane::Dns).unwrap();
+        tab.checks.insert(
+            CheckId::Dns,
+            CheckSlot {
+                status: CheckStatus::Done,
+                update: Some(CheckUpdate::Dns(crate::checks::dns::DnsResult::default())),
+            },
+        );
+        tab.checks.insert(
+            CheckId::Whois,
+            CheckSlot {
+                status: CheckStatus::Done,
+                update: Some(CheckUpdate::Whois(crate::checks::whois::WhoisResult {
+                    domain: "example.com".to_string(),
+                    info: Some(crate::checks::whois::WhoisInfo {
+                        source: crate::checks::whois::WhoisSource::Rdap,
+                        registrar: Some("Example Registrar, Inc.".to_string()),
+                        created: Some("1995-08-14T04:00:00Z".to_string()),
+                        updated: Some("2024-08-14T04:00:00Z".to_string()),
+                        expires: Some("2026-08-13T04:00:00Z".to_string()),
+                        statuses: vec!["client transfer prohibited".to_string()],
+                        name_servers: vec!["ns1.example.com".to_string()],
+                        registrant_org: None,
+                    }),
+                    errors: Vec::new(),
+                })),
+            },
+        );
+        state.tabs.push(tab);
+
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| draw(frame, &state)).unwrap();
+        let content = buffer_to_string(terminal.backend().buffer());
+        assert!(
+            content.contains("Example Registrar, Inc."),
+            "expected the registrar name to be visible: {content}"
+        );
+        assert!(
+            content.contains("expires 2026-08-13T04:00:00Z"),
+            "expected the expiry date to be visible: {content}"
+        );
+    }
+
     /// A hostname/IP `ui::linkscan` finds must render underlined, and
     /// whichever one has keyboard focus (`TabState::focused_link`) must
     /// render highlighted instead -- the two-tier visual language

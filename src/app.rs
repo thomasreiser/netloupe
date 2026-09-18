@@ -82,7 +82,7 @@ impl Pane {
                 CheckId::Ping,
                 CheckId::AltNames,
             ],
-            Pane::Dns => &[CheckId::Dns],
+            Pane::Dns => &[CheckId::Dns, CheckId::Whois],
             Pane::Mail => &[CheckId::Mail],
             Pane::PingTrace => &[CheckId::Ping, CheckId::Trace],
             Pane::Ports => &[CheckId::Ports],

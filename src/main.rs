@@ -495,6 +495,23 @@ fn update_json(update: &CheckUpdate) -> serde_json::Value {
                 "provider": h.provider,
             })).collect::<Vec<_>>(),
         }),
+        CheckUpdate::Whois(w) => json!({
+            "domain": w.domain,
+            "info": w.info.as_ref().map(|i| json!({
+                "source": match &i.source {
+                    crate::checks::whois::WhoisSource::Rdap => "rdap".to_string(),
+                    crate::checks::whois::WhoisSource::Whois(server) => format!("whois ({server})"),
+                },
+                "registrar": i.registrar,
+                "created": i.created,
+                "updated": i.updated,
+                "expires": i.expires,
+                "statuses": i.statuses,
+                "name_servers": i.name_servers,
+                "registrant_org": i.registrant_org,
+            })),
+            "errors": w.errors,
+        }),
         CheckUpdate::NotImplemented => json!(null),
     }
 }
