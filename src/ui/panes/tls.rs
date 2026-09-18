@@ -349,13 +349,13 @@ fn dns01_lines(acme: &AcmeInfo) -> Vec<Line<'static>> {
 }
 
 fn http01_lines(http01: &crate::checks::acme::Http01Evidence) -> Vec<Line<'static>> {
-    if let Some(body) = &http01.body_sample {
+    if http01.looks_valid {
         return vec![
             Line::from(vec![
                 label("HTTP-01"),
                 Span::styled(
                     format!(
-                        "responder still active (status {})",
+                        "responder still active (status {}, valid key authorization)",
                         http01
                             .status
                             .map(|s| s.to_string())
@@ -366,16 +366,29 @@ fn http01_lines(http01: &crate::checks::acme::Http01Evidence) -> Vec<Line<'stati
             ]),
             Line::from(vec![
                 label(""),
-                Span::styled(body.clone(), Style::default().fg(theme::TEXT)),
+                Span::styled(
+                    http01.body_sample.clone().unwrap_or_default(),
+                    Style::default().fg(theme::TEXT),
+                ),
             ]),
         ];
     }
-    let text = match (&http01.status, &http01.error) {
-        (Some(status), _) => {
+    // A non-empty (even HTTP-200) response here isn't evidence of
+    // anything by itself -- a 404 page, a WAF block page, or a directory
+    // listing all return one too, with nothing to do with ACME. Only
+    // `looks_valid` (a well-formed key authorization) earns the green
+    // "still active" text above; anything else says plainly that
+    // whatever came back isn't real evidence, rather than implying it
+    // might be.
+    let text = match (&http01.status, &http01.body_sample, &http01.error) {
+        (Some(status), Some(_), _) => format!(
+            "{status} at /.well-known/acme-challenge/ (a response, but not a valid key authorization — not ACME evidence)"
+        ),
+        (Some(status), None, _) => {
             format!("{status} at /.well-known/acme-challenge/ (no active challenge — expected)")
         }
-        (None, Some(err)) => format!("unreachable ({err})"),
-        (None, None) => "unreachable".to_string(),
+        (None, _, Some(err)) => format!("unreachable ({err})"),
+        (None, _, None) => "unreachable".to_string(),
     };
     vec![Line::from(vec![
         label("HTTP-01"),
