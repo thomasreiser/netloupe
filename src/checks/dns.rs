@@ -208,11 +208,12 @@ async fn resolve_host(name: &str, opts: DnsOpts) -> DnsResult {
         }
     };
 
-    fill_forward_records(&resolver, name, &mut result).await;
+    let name = fqdn(name);
+    fill_forward_records(&resolver, &name, &mut result).await;
 
-    fill_any_query(&resolver, name, &mut result).await;
-    result.zone_signing = detect_zone_signing(name, opts).await;
-    result.axfr = attempt_axfr_all(name, &result.ns, opts).await;
+    fill_any_query(&resolver, &name, &mut result).await;
+    result.zone_signing = detect_zone_signing(&name, opts).await;
+    result.axfr = attempt_axfr_all(&name, &result.ns, opts).await;
 
     result
 }
@@ -674,6 +675,23 @@ pub fn system_resolver_ips() -> Vec<IpAddr> {
     ips
 }
 
+/// Marks `name` as a fully-qualified domain name (a trailing dot) before
+/// it reaches any hickory-resolver lookup. Without this, a name with
+/// fewer labels than the system's configured `ndots` gets the local
+/// network's search domain(s) tried instead of (or as well as) the name
+/// itself -- silently investigating the wrong host, or a search-suffixed
+/// name that doesn't exist, rather than the exact target the user typed.
+/// A trailing dot skips that entirely: hickory queries the name exactly
+/// as given, in one query, regardless of `ndots` or how the resolver's
+/// search list is configured.
+fn fqdn(name: &str) -> String {
+    if name.ends_with('.') {
+        name.to_string()
+    } else {
+        format!("{name}.")
+    }
+}
+
 /// Builds the resolver every plain lookup in this module (and, via the
 /// public `lookup_*`/`resolve_addrs` functions, every other check) goes
 /// through: the per-tab custom DNS server from `opts.resolver` when the
@@ -722,6 +740,7 @@ async fn compare_resolvers(
     if ctx.config.resolvers.comparison.is_empty() {
         return;
     }
+    let query_name = fqdn(name);
     let baseline: std::collections::BTreeSet<IpAddr> = result
         .a
         .iter()
@@ -732,7 +751,7 @@ async fn compare_resolvers(
     for &server in &ctx.config.resolvers.comparison {
         let name = name.to_string();
         let comparison = match resolver_for(server, timeout) {
-            Ok(resolver) => match resolver.lookup_ip(name.as_str()).await {
+            Ok(resolver) => match resolver.lookup_ip(query_name.as_str()).await {
                 Ok(lookup) => {
                     let ips: std::collections::BTreeSet<IpAddr> = lookup.iter().collect();
                     if ips != baseline {
@@ -769,7 +788,7 @@ fn fmt_set(ips: &std::collections::BTreeSet<IpAddr>) -> String {
 pub async fn resolve_addrs(name: &str, opts: DnsOpts) -> Result<Vec<IpAddr>, String> {
     let resolver = system_resolver(opts)?;
     resolver
-        .lookup_ip(name)
+        .lookup_ip(fqdn(name))
         .await
         .map(|lookup| lookup.iter().collect())
         .map_err(|e| e.to_string())
@@ -779,7 +798,7 @@ pub async fn resolve_addrs(name: &str, opts: DnsOpts) -> Result<Vec<IpAddr>, Str
 /// a one-off MX query outside the main `DnsResult`.
 pub async fn lookup_mx(name: &str, opts: DnsOpts) -> Result<Vec<MxRecord>, String> {
     let resolver = system_resolver(opts)?;
-    match resolver.mx_lookup(name).await {
+    match resolver.mx_lookup(fqdn(name)).await {
         Ok(lookup) => Ok(lookup
             .answers()
             .iter()
@@ -802,7 +821,7 @@ pub async fn lookup_mx(name: &str, opts: DnsOpts) -> Result<Vec<MxRecord>, Strin
 /// TXT records" is a normal, common answer.
 pub async fn lookup_txt(name: &str, opts: DnsOpts) -> Result<Vec<String>, String> {
     let resolver = system_resolver(opts)?;
-    match resolver.txt_lookup(name).await {
+    match resolver.txt_lookup(fqdn(name)).await {
         Ok(lookup) => Ok(lookup
             .answers()
             .iter()
@@ -822,7 +841,7 @@ pub async fn lookup_txt(name: &str, opts: DnsOpts) -> Result<Vec<String>, String
 /// goes through the generic `lookup`.
 pub async fn lookup_cname(name: &str, opts: DnsOpts) -> Result<Option<String>, String> {
     let resolver = system_resolver(opts)?;
-    match resolver.lookup(name, RecordType::CNAME).await {
+    match resolver.lookup(fqdn(name), RecordType::CNAME).await {
         Ok(lookup) => Ok(lookup.answers().iter().find_map(|r| match &r.data {
             RData::CNAME(cname) => Some(cname.0.to_string()),
             _ => None,
@@ -888,6 +907,13 @@ mod tests {
             classify_nsec_error(&NetError::Busy),
             ZoneSigning::NotSignedOrUnknown
         );
+    }
+
+    #[test]
+    fn fqdn_appends_a_trailing_dot_only_when_missing() {
+        assert_eq!(fqdn("example.com"), "example.com.");
+        assert_eq!(fqdn("example.com."), "example.com.");
+        assert_eq!(fqdn(""), ".");
     }
 
     #[test]
