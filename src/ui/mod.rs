@@ -1981,6 +1981,58 @@ mod tests {
         );
     }
 
+    /// The zone tree only fits in a fixed right-hand column on a
+    /// reasonably wide terminal (see `panes::dns`'s `MIN_WIDTH_FOR_TREE`);
+    /// a 200-column terminal comfortably qualifies.
+    #[test]
+    fn dns_pane_shows_a_zone_tree_on_a_wide_terminal() {
+        let mut state = AppState::new(Config::default(), ProviderDb::default());
+        let mut tab = empty_tab(1, "admin.ft.europe.example.com");
+        tab.active_pane = Pane::ALL.iter().position(|&p| p == Pane::Dns).unwrap();
+        tab.checks.insert(
+            CheckId::Dns,
+            CheckSlot {
+                status: CheckStatus::Done,
+                update: Some(CheckUpdate::Dns(crate::checks::dns::DnsResult {
+                    queried_name: "admin.ft.europe.example.com".to_string(),
+                    delegation_trace: vec![
+                        crate::checks::dns::DelegationHop {
+                            zone: "com.".to_string(),
+                            answered_by: "a.root-servers.net (198.41.0.4)".to_string(),
+                            delegates_to: vec!["a.gtld-servers.net.".to_string()],
+                            rtt: Duration::from_millis(1),
+                        },
+                        crate::checks::dns::DelegationHop {
+                            zone: "example.com.".to_string(),
+                            answered_by: "a.gtld-servers.net. (192.5.6.30)".to_string(),
+                            delegates_to: Vec::new(),
+                            rtt: Duration::from_millis(1),
+                        },
+                    ],
+                    ..Default::default()
+                })),
+            },
+        );
+        state.tabs.push(tab);
+
+        let backend = TestBackend::new(200, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| draw(frame, &state)).unwrap();
+        let content = buffer_to_string(terminal.backend().buffer());
+        assert!(
+            content.contains("Zone tree"),
+            "expected the zone tree panel heading: {content}"
+        );
+        assert!(
+            content.contains("example.com"),
+            "expected the apex domain node: {content}"
+        );
+        assert!(
+            content.contains('▸'),
+            "expected a marker for the currently-inspected host: {content}"
+        );
+    }
+
     /// A hostname/IP `ui::linkscan` finds must render underlined, and
     /// whichever one has keyboard focus (`TabState::focused_link`) must
     /// render highlighted instead -- the two-tier visual language
