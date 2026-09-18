@@ -10,7 +10,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::time::Duration;
 
 use hickory_proto::dnssec::rdata::DNSSECRData;
-use hickory_proto::op::{Message, Query, ResponseCode};
+use hickory_proto::op::{Edns, Message, Query, ResponseCode};
 use hickory_proto::rr::{Name, RData, Record, RecordType};
 use hickory_proto::serialize::binary::BinEncodable;
 use hickory_resolver::config::{NameServerConfig, ResolverConfig};
@@ -18,7 +18,7 @@ use hickory_resolver::net::runtime::TokioRuntimeProvider;
 use hickory_resolver::net::{DnsError, NetError, NoRecords};
 use hickory_resolver::{Resolver, TokioResolver};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
+use tokio::net::{TcpStream, UdpSocket};
 use tokio::sync::mpsc;
 
 use super::CheckContext;
@@ -76,6 +76,25 @@ pub struct AuthorityZone {
     pub ns: Vec<(String, u32)>,
 }
 
+/// One hop of a `dig +trace`-style delegation walk: which server was
+/// asked, and what it delegated to -- or, at the final hop, that it gave
+/// an authoritative answer instead of a further referral.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DelegationHop {
+    /// The zone this hop's response delegates into (the owner name of
+    /// its authority section's NS records), or the last zone reached at
+    /// the final, authoritative hop.
+    pub zone: String,
+    /// Which server answered this hop: `name (ip)` when the name is
+    /// known (every root server, or a delegate resolved by name), the
+    /// bare IP otherwise.
+    pub answered_by: String,
+    /// The NS names this hop delegated to, in order; empty at the final,
+    /// authoritative hop.
+    pub delegates_to: Vec<String>,
+    pub rtt: Duration,
+}
+
 /// Everything the DNS check gathered for one target, from one resolver.
 #[derive(Debug, Clone, Default)]
 pub struct DnsResult {
@@ -125,6 +144,14 @@ pub struct DnsResult {
     /// `succeeded: true` on any of these is a real misconfiguration worth
     /// flagging prominently.
     pub axfr: Vec<AxfrAttempt>,
+    /// A `dig +trace`-style walk from the root down to whichever server
+    /// is actually authoritative for the queried name, following NS
+    /// referrals one zone cut at a time (see `DelegationHop`). Queries
+    /// root/TLD/delegated servers directly over UDP rather than through
+    /// `opts.resolver` or the system resolver -- that's the entire point
+    /// of a trace, the same way `dig +trace` always bypasses your
+    /// configured resolver.
+    pub delegation_trace: Vec<DelegationHop>,
     /// One message per record type that failed to resolve (NXDOMAIN, a
     /// timeout, ...). Never fatal: a domain with no MX records still shows
     /// its A/NS/TXT records fine.
@@ -234,6 +261,19 @@ async fn resolve_host(name: &str, opts: DnsOpts) -> DnsResult {
     fill_any_query(&resolver, &name, &mut result).await;
     result.zone_signing = detect_zone_signing(&name, opts).await;
     result.axfr = attempt_axfr_all(&name, &result.ns, opts).await;
+
+    match name.parse::<Name>() {
+        Ok(query_name) => {
+            let (trace, trace_error) = delegation_trace(&query_name, opts).await;
+            result.delegation_trace = trace;
+            if let Some(err) = trace_error {
+                result.errors.push(err);
+            }
+        }
+        Err(err) => result
+            .errors
+            .push(format!("delegation trace: invalid name: {err}")),
+    }
 
     result
 }
@@ -636,6 +676,296 @@ async fn do_axfr(zone: &str, ns_ip: IpAddr) -> Result<usize, String> {
         );
     }
     Ok(total_records)
+}
+
+/// The 13 IANA root server IPv4 addresses -- the "root hints" every
+/// resolver ships with (see <https://www.iana.org/domains/root/servers>),
+/// stable for decades. Hardcoding them here means a trace can start
+/// straight away, the same way a resolver's bundled hints file lets it
+/// skip a priming query.
+const ROOT_SERVERS: [(&str, Ipv4Addr); 13] = [
+    ("a.root-servers.net", Ipv4Addr::new(198, 41, 0, 4)),
+    ("b.root-servers.net", Ipv4Addr::new(199, 9, 14, 201)),
+    ("c.root-servers.net", Ipv4Addr::new(192, 33, 4, 12)),
+    ("d.root-servers.net", Ipv4Addr::new(199, 7, 91, 13)),
+    ("e.root-servers.net", Ipv4Addr::new(192, 203, 230, 10)),
+    ("f.root-servers.net", Ipv4Addr::new(192, 5, 5, 241)),
+    ("g.root-servers.net", Ipv4Addr::new(192, 112, 36, 4)),
+    ("h.root-servers.net", Ipv4Addr::new(198, 97, 190, 53)),
+    ("i.root-servers.net", Ipv4Addr::new(192, 36, 148, 17)),
+    ("j.root-servers.net", Ipv4Addr::new(192, 58, 128, 30)),
+    ("k.root-servers.net", Ipv4Addr::new(193, 0, 14, 129)),
+    ("l.root-servers.net", Ipv4Addr::new(199, 7, 83, 42)),
+    ("m.root-servers.net", Ipv4Addr::new(202, 12, 27, 33)),
+];
+
+/// How many referrals to follow before giving up: a real chain is root ->
+/// TLD -> (occasionally one or two more delegated levels) ->
+/// authoritative, so this comfortably covers any real zone while still
+/// bounding a misconfigured delegation loop.
+const MAX_TRACE_HOPS: usize = 12;
+
+/// A candidate nameserver for the next query: its name, when known (every
+/// root server, or a delegate resolved by name), and its IP.
+type TraceCandidate = (Option<String>, IpAddr);
+/// One hop's successful response: the raw message, who answered (for
+/// display), and how long it took.
+type TraceResponse = (Message, String, Duration);
+
+/// Walks the delegation chain for `name` from the root down to whichever
+/// server is authoritative for it, one zone cut at a time -- the same
+/// thing `dig +trace` shows. Returns whatever hops were completed even if
+/// it stops early (a broken delegation, an unreachable server, ...),
+/// alongside a message explaining why it stopped, if it did.
+async fn delegation_trace(name: &Name, opts: DnsOpts) -> (Vec<DelegationHop>, Option<String>) {
+    let mut hops = Vec::new();
+    let mut candidates: Vec<TraceCandidate> = ROOT_SERVERS
+        .iter()
+        .map(|(hostname, ip)| (Some((*hostname).to_string()), IpAddr::V4(*ip)))
+        .collect();
+    let mut last_zone = Name::root();
+
+    for _ in 0..MAX_TRACE_HOPS {
+        let Some((message, answered_by, rtt)) =
+            query_first_responding(&candidates, name, opts.timeout).await
+        else {
+            return (
+                hops,
+                Some("delegation trace: none of the current nameservers responded".to_string()),
+            );
+        };
+
+        let (zone_name, delegate_names) = match classify_trace_response(&message) {
+            TraceOutcome::Final => {
+                hops.push(DelegationHop {
+                    zone: last_zone.to_string(),
+                    answered_by,
+                    delegates_to: Vec::new(),
+                    rtt,
+                });
+                return (hops, None);
+            }
+            TraceOutcome::Inconclusive => {
+                return (
+                    hops,
+                    Some(
+                        "delegation trace: response had neither an answer nor a delegation"
+                            .to_string(),
+                    ),
+                );
+            }
+            TraceOutcome::Delegation { zone, delegates_to } => (zone, delegates_to),
+        };
+        if zone_name == last_zone {
+            return (
+                hops,
+                Some(format!(
+                    "delegation trace: stopped -- {zone_name} referred back to itself"
+                )),
+            );
+        }
+
+        hops.push(DelegationHop {
+            zone: zone_name.to_string(),
+            answered_by,
+            delegates_to: delegate_names.iter().map(ToString::to_string).collect(),
+            rtt,
+        });
+
+        candidates = next_hop_candidates(&message, &delegate_names, opts).await;
+        if candidates.is_empty() {
+            return (
+                hops,
+                Some(format!(
+                    "delegation trace: could not resolve any nameserver for {zone_name}"
+                )),
+            );
+        }
+        last_zone = zone_name;
+    }
+
+    (
+        hops,
+        Some("delegation trace: stopped after too many referrals".to_string()),
+    )
+}
+
+/// What one trace hop's response revealed, pure so it's testable without
+/// a real query -- see `classify_trace_response`.
+#[derive(Debug, PartialEq, Eq)]
+enum TraceOutcome {
+    /// An answer (even an empty, authoritative one) rather than a
+    /// further referral: this server is authoritative for the queried
+    /// name, so the walk is done.
+    Final,
+    /// A referral to a deeper zone.
+    Delegation { zone: Name, delegates_to: Vec<Name> },
+    /// Neither an answer nor a usable delegation -- a malformed or
+    /// unhelpful response.
+    Inconclusive,
+}
+
+/// Classifies a trace hop's raw response: an authoritative answer, a
+/// referral to a deeper zone (via its authority section's NS records),
+/// or neither. Pure -- kept separate from `delegation_trace`'s network
+/// I/O so it's unit-testable with a hand-built `Message`.
+fn classify_trace_response(message: &Message) -> TraceOutcome {
+    if !message.answers.is_empty() || message.metadata.authoritative {
+        return TraceOutcome::Final;
+    }
+    let ns_records: Vec<&Record> = message
+        .authorities
+        .iter()
+        .filter(|r| r.record_type() == RecordType::NS)
+        .collect();
+    let Some(zone) = ns_records.first().map(|r| r.name.clone()) else {
+        return TraceOutcome::Inconclusive;
+    };
+    let delegates_to = ns_records
+        .iter()
+        .filter_map(|r| match &r.data {
+            RData::NS(ns) => Some(ns.0.clone()),
+            _ => None,
+        })
+        .collect();
+    TraceOutcome::Delegation { zone, delegates_to }
+}
+
+/// Glue records (A/AAAA) in `message`'s additional section for any of
+/// `delegate_names` -- pure, kept separate from `next_hop_candidates`'
+/// resolver fallback so it's unit-testable without a real lookup.
+fn extract_glue(message: &Message, delegate_names: &[Name]) -> Vec<TraceCandidate> {
+    let mut candidates: Vec<TraceCandidate> = Vec::new();
+    for delegate in delegate_names {
+        for r in &message.additionals {
+            if &r.name != delegate {
+                continue;
+            }
+            let ip = match &r.data {
+                RData::A(a) => Some(IpAddr::V4(a.0)),
+                RData::AAAA(aaaa) => Some(IpAddr::V6(aaaa.0)),
+                _ => None,
+            };
+            if let Some(ip) = ip {
+                candidates.push((Some(delegate.to_string()), ip));
+            }
+        }
+    }
+    candidates
+}
+
+/// The next hop's candidate servers: glue (A/AAAA already in the
+/// response's additional section) when present -- some zones only work
+/// via glue in the first place (in-bailiwick nameservers) -- otherwise a
+/// direct lookup of the delegate names through the normal resolver.
+async fn next_hop_candidates(
+    message: &Message,
+    delegate_names: &[Name],
+    opts: DnsOpts,
+) -> Vec<TraceCandidate> {
+    let candidates = extract_glue(message, delegate_names);
+    if !candidates.is_empty() {
+        return candidates;
+    }
+
+    // No glue: trying just the first couple of delegates is enough --
+    // if a name is unreachable or doesn't resolve, the next hop's
+    // `query_first_responding` still fails fast rather than hanging on a
+    // dead one, and a real delegation rarely needs more than this to
+    // find a working nameserver.
+    let mut candidates: Vec<TraceCandidate> = Vec::new();
+    for delegate in delegate_names.iter().take(3) {
+        if let Ok(ips) = resolve_addrs(&delegate.to_string(), opts).await {
+            candidates.extend(ips.into_iter().map(|ip| (Some(delegate.to_string()), ip)));
+            if !candidates.is_empty() {
+                break;
+            }
+        }
+    }
+    candidates
+}
+
+/// Queries every candidate concurrently and returns whichever answers
+/// first -- a root/TLD zone cut has many nameservers precisely so that
+/// losing some of them doesn't matter, and querying them one at a time
+/// would otherwise multiply a single hop's worst-case latency by however
+/// many of them happen to be unreachable.
+async fn query_first_responding(
+    candidates: &[TraceCandidate],
+    name: &Name,
+    timeout: Duration,
+) -> Option<(Message, String, Duration)> {
+    type TraceAttempt =
+        std::pin::Pin<Box<dyn std::future::Future<Output = Result<TraceResponse, String>> + Send>>;
+    let attempts: Vec<TraceAttempt> = candidates
+        .iter()
+        .map(|(hostname, ip)| {
+            let hostname = hostname.clone();
+            let ip = *ip;
+            let name = name.clone();
+            let fut = async move {
+                let start = std::time::Instant::now();
+                let message = query_referral(ip, &name, timeout).await?;
+                let rtt = start.elapsed();
+                let answered_by = match hostname {
+                    Some(h) => format!("{h} ({ip})"),
+                    None => ip.to_string(),
+                };
+                Ok::<_, String>((message, answered_by, rtt))
+            };
+            Box::pin(fut) as TraceAttempt
+        })
+        .collect();
+    futures::future::select_ok(attempts)
+        .await
+        .ok()
+        .map(|(v, _remaining)| v)
+}
+
+/// Sends one non-recursive (RD=0) query directly to `server_ip:53` over
+/// UDP and returns the raw response -- a root/TLD/delegated server's
+/// referral (its authority and additional sections), never a recursive
+/// resolver's fully-resolved answer, which is what `delegation_trace`
+/// needs in order to walk the chain one zone cut at a time. Deliberately
+/// bypasses `opts.resolver`/the system resolver: that's what makes this a
+/// trace rather than an ordinary lookup.
+async fn query_referral(
+    server_ip: IpAddr,
+    name: &Name,
+    timeout: Duration,
+) -> Result<Message, String> {
+    let mut query = Message::query();
+    query.metadata.recursion_desired = false;
+    query.add_query(Query::query(name.clone(), RecordType::A));
+    // A root/TLD referral lists every nameserver plus its glue records,
+    // comfortably past the 512-byte limit a plain (non-EDNS) UDP query
+    // is held to -- without this, a truncated response would look like
+    // an empty, dead-end delegation.
+    let mut edns = Edns::new();
+    edns.set_max_payload(4096);
+    query.set_edns(edns);
+    let bytes = query.to_bytes().map_err(|e| e.to_string())?;
+
+    let bind_addr = if server_ip.is_ipv4() {
+        "0.0.0.0:0"
+    } else {
+        "[::]:0"
+    };
+    let socket = UdpSocket::bind(bind_addr)
+        .await
+        .map_err(|e| e.to_string())?;
+    socket
+        .connect((server_ip, 53))
+        .await
+        .map_err(|e| e.to_string())?;
+    socket.send(&bytes).await.map_err(|e| e.to_string())?;
+
+    let mut buf = [0u8; 4096];
+    let n = tokio::time::timeout(timeout, socket.recv(&mut buf))
+        .await
+        .map_err(|_| "timed out".to_string())?
+        .map_err(|e| e.to_string())?;
+    Message::from_vec(&buf[..n]).map_err(|e| e.to_string())
 }
 
 fn classify_forward_record(record: &Record, result: &mut DnsResult) {
@@ -1056,6 +1386,94 @@ mod tests {
             ResponseCode::NoError,
         );
         assert!(authority_zone_from_no_records(&no_records).is_none());
+    }
+
+    fn ns_record(owner: &str, target: &str) -> Record {
+        use hickory_proto::rr::rdata;
+        Record::from_rdata(
+            Name::from_str(owner).unwrap(),
+            3600,
+            RData::NS(rdata::NS(Name::from_str(target).unwrap())),
+        )
+    }
+
+    fn a_record(owner: &str, ip: Ipv4Addr) -> Record {
+        use hickory_proto::rr::rdata;
+        Record::from_rdata(Name::from_str(owner).unwrap(), 3600, RData::A(rdata::A(ip)))
+    }
+
+    #[test]
+    fn classify_trace_response_is_final_when_answers_are_present() {
+        let mut message = Message::query();
+        message.answers = vec![a_record("example.com.", Ipv4Addr::new(93, 184, 216, 34))];
+        assert_eq!(classify_trace_response(&message), TraceOutcome::Final);
+    }
+
+    #[test]
+    fn classify_trace_response_is_final_for_an_authoritative_nodata_reply() {
+        let mut message = Message::query();
+        message.metadata.authoritative = true;
+        assert_eq!(classify_trace_response(&message), TraceOutcome::Final);
+    }
+
+    #[test]
+    fn classify_trace_response_is_a_delegation_when_authorities_carry_ns_records() {
+        let mut message = Message::query();
+        message.authorities = vec![
+            ns_record("com.", "a.gtld-servers.net."),
+            ns_record("com.", "b.gtld-servers.net."),
+        ];
+        match classify_trace_response(&message) {
+            TraceOutcome::Delegation { zone, delegates_to } => {
+                assert_eq!(zone, Name::from_str("com.").unwrap());
+                assert_eq!(
+                    delegates_to,
+                    vec![
+                        Name::from_str("a.gtld-servers.net.").unwrap(),
+                        Name::from_str("b.gtld-servers.net.").unwrap(),
+                    ]
+                );
+            }
+            other => panic!("expected a Delegation outcome, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_trace_response_is_inconclusive_with_neither_answers_nor_ns() {
+        let message = Message::query();
+        assert_eq!(
+            classify_trace_response(&message),
+            TraceOutcome::Inconclusive
+        );
+    }
+
+    #[test]
+    fn extract_glue_finds_matching_address_records() {
+        let mut message = Message::query();
+        message.additionals = vec![
+            a_record("a.gtld-servers.net.", Ipv4Addr::new(192, 5, 6, 30)),
+            a_record("other.example.", Ipv4Addr::new(203, 0, 113, 1)),
+        ];
+        let delegates = vec![Name::from_str("a.gtld-servers.net.").unwrap()];
+        let glue = extract_glue(&message, &delegates);
+        assert_eq!(
+            glue,
+            vec![(
+                Some("a.gtld-servers.net.".to_string()),
+                IpAddr::V4(Ipv4Addr::new(192, 5, 6, 30))
+            )]
+        );
+    }
+
+    #[test]
+    fn extract_glue_is_empty_without_a_matching_additional_record() {
+        let mut message = Message::query();
+        message.additionals = vec![a_record(
+            "unrelated.example.",
+            Ipv4Addr::new(203, 0, 113, 1),
+        )];
+        let delegates = vec![Name::from_str("a.gtld-servers.net.").unwrap()];
+        assert!(extract_glue(&message, &delegates).is_empty());
     }
 
     #[test]

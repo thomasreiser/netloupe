@@ -378,6 +378,12 @@ fn update_json(update: &CheckUpdate) -> serde_json::Value {
                 "record_count": a.record_count,
                 "detail": a.detail,
             })).collect::<Vec<_>>(),
+            "delegation_trace": d.delegation_trace.iter().map(|h| json!({
+                "zone": h.zone,
+                "answered_by": h.answered_by,
+                "delegates_to": h.delegates_to,
+                "rtt_ms": h.rtt.as_millis() as u64,
+            })).collect::<Vec<_>>(),
             "errors": d.errors,
         }),
         CheckUpdate::Ping(p) => json!({
