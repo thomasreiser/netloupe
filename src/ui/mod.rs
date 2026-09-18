@@ -1748,6 +1748,61 @@ mod tests {
         );
     }
 
+    /// A global (publicly routable) IP skips the "not publicly routable"
+    /// banner line entirely -- that line's region must not still budget a
+    /// layout gap for a line that's never rendered, or the table ends up
+    /// with a stray blank row above it every time (the common case).
+    #[test]
+    fn ipasn_pane_has_no_gap_above_the_table_for_a_global_ip() {
+        let mut state = AppState::new(Config::default(), ProviderDb::default());
+        let mut tab = empty_tab(1, "example.com");
+        tab.active_pane = Pane::ALL.iter().position(|&p| p == Pane::IpAsn).unwrap();
+        tab.checks.insert(
+            CheckId::IpInfo,
+            CheckSlot {
+                status: CheckStatus::Done,
+                update: Some(CheckUpdate::IpInfo(crate::checks::ipinfo::IpInfoResult {
+                    ip: "93.184.216.34".parse().unwrap(),
+                    class: crate::checks::ipinfo::IpClass::Global,
+                    asn: None,
+                    rpki: None,
+                    rdap: None,
+                    errors: Vec::new(),
+                })),
+            },
+        );
+        state.tabs.push(tab);
+
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| draw(frame, &state)).unwrap();
+        let buffer = terminal.backend().buffer();
+
+        let row_text = |y: u16| -> String {
+            (0..buffer.area.width)
+                .map(|x| buffer.cell((x, y)).unwrap().symbol())
+                .collect()
+        };
+        // Not a plain "IP/ASN" search: that also matches the pane-selector
+        // tab bar and the panel's own border title, both above the status
+        // header. The status header alone pairs it with a "done" glyph.
+        let status_row = (0..buffer.area.height)
+            .find(|&y| row_text(y).contains("● IP/ASN"))
+            .expect("the status header must be on screen");
+        let ip_row = (0..buffer.area.height)
+            .find(|&y| row_text(y).contains("93.184.216.34"))
+            .expect("the IP row must be on screen");
+        // Exactly one blank separator row, same as every other pane's gap
+        // between `header_and_body`'s status line and its own content --
+        // not the extra one a since-fixed layout bug added for a global
+        // IP specifically.
+        assert_eq!(
+            ip_row,
+            status_row + 2,
+            "expected exactly one blank row between the status header and the IP row"
+        );
+    }
+
     /// A zone walk that fails immediately (e.g. it can't actually enter
     /// the NSEC chain) must surface why, rather than looking identical
     /// to one that simply hasn't found any names yet.
