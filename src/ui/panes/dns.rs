@@ -402,6 +402,60 @@ fn render_discovery(
         _ => {}
     }
 
+    render_delegation_trace(&mut lines, dns);
+
     let scroll = super::clamp_scroll(tab.scroll, lines.len(), inner.height);
     frame.render_widget(Paragraph::new(lines).scroll((scroll, 0)), inner);
+}
+
+/// A `dig +trace`-style delegation walk, appended below Discovery's other
+/// content: one line per hop, root first, showing which server answered
+/// and what it delegated to -- or, at the final hop, that it answered
+/// authoritatively instead.
+fn render_delegation_trace(lines: &mut Vec<Line<'static>>, dns: &crate::checks::dns::DnsResult) {
+    if dns.delegation_trace.is_empty() {
+        return;
+    }
+    lines.push(Line::from(Span::styled(
+        "Delegation trace (dig +trace)",
+        Style::default()
+            .fg(theme::MUTED)
+            .add_modifier(Modifier::BOLD),
+    )));
+    for hop in &dns.delegation_trace {
+        let detail = if hop.delegates_to.is_empty() {
+            format!(
+                "authoritative answer from {} ({}ms)",
+                hop.answered_by,
+                hop.rtt.as_millis()
+            )
+        } else {
+            const MAX_NAMES_SHOWN: usize = 3;
+            let mut names = hop
+                .delegates_to
+                .iter()
+                .take(MAX_NAMES_SHOWN)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ");
+            if hop.delegates_to.len() > MAX_NAMES_SHOWN {
+                names.push_str(&format!(
+                    ", +{} more",
+                    hop.delegates_to.len() - MAX_NAMES_SHOWN
+                ));
+            }
+            format!(
+                "→ {names}  (via {}, {}ms)",
+                hop.answered_by,
+                hop.rtt.as_millis()
+            )
+        };
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("  {:<24}", hop.zone),
+                Style::default().fg(theme::LABEL),
+            ),
+            Span::styled(detail, Style::default().fg(theme::TEXT)),
+        ]));
+    }
 }

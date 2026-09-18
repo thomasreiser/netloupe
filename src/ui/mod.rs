@@ -1885,6 +1885,54 @@ mod tests {
         );
     }
 
+    #[test]
+    fn dns_pane_shows_the_delegation_trace_below_discovery() {
+        let mut state = AppState::new(Config::default(), ProviderDb::default());
+        let mut tab = empty_tab(1, "example.com");
+        tab.active_pane = Pane::ALL.iter().position(|&p| p == Pane::Dns).unwrap();
+        tab.checks.insert(
+            CheckId::Dns,
+            CheckSlot {
+                status: CheckStatus::Done,
+                update: Some(CheckUpdate::Dns(crate::checks::dns::DnsResult {
+                    delegation_trace: vec![
+                        crate::checks::dns::DelegationHop {
+                            zone: "com.".to_string(),
+                            answered_by: "a.root-servers.net (198.41.0.4)".to_string(),
+                            delegates_to: vec!["a.gtld-servers.net.".to_string()],
+                            rtt: Duration::from_millis(12),
+                        },
+                        crate::checks::dns::DelegationHop {
+                            zone: "example.com.".to_string(),
+                            answered_by: "a.gtld-servers.net (192.5.6.30)".to_string(),
+                            delegates_to: Vec::new(),
+                            rtt: Duration::from_millis(9),
+                        },
+                    ],
+                    ..Default::default()
+                })),
+            },
+        );
+        state.tabs.push(tab);
+
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| draw(frame, &state)).unwrap();
+        let content = buffer_to_string(terminal.backend().buffer());
+        assert!(
+            content.contains("Delegation trace"),
+            "expected a delegation trace heading: {content}"
+        );
+        assert!(
+            content.contains("a.gtld-servers.net"),
+            "expected the first hop's delegate to be visible: {content}"
+        );
+        assert!(
+            content.contains("authoritative answer"),
+            "expected the final hop to read as an authoritative answer: {content}"
+        );
+    }
+
     /// A hostname/IP `ui::linkscan` finds must render underlined, and
     /// whichever one has keyboard focus (`TabState::focused_link`) must
     /// render highlighted instead -- the two-tier visual language
