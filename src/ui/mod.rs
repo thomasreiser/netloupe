@@ -667,11 +667,7 @@ fn render_confirm_ports(frame: &mut Frame, area: Rect) {
         .split(inner);
     let text = Paragraph::new(vec![
         Line::from(Span::styled(
-            "Scanning a host's ports without authorization may be illegal",
-            Style::default().fg(theme::TEXT),
-        )),
-        Line::from(Span::styled(
-            "(e.g. §202c StGB in Germany).",
+            "Scanning a host's ports without authorization may be illegal (e.g. §202c StGB in Germany).",
             Style::default().fg(theme::TEXT),
         )),
         Line::from(Span::styled(
