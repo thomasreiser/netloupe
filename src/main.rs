@@ -357,6 +357,14 @@ fn update_json(update: &CheckUpdate) -> serde_json::Value {
             "mx": d.mx.iter().map(|m| format!("{} {}", m.preference, m.exchange)).collect::<Vec<_>>(),
             "ns": d.ns,
             "txt": d.txt,
+            "soa": d.soa.as_ref().map(|s| json!({
+                "mname": s.mname, "rname": s.rname, "serial": s.serial,
+            })),
+            "authority": d.authority.as_ref().map(|a| json!({
+                "zone": a.zone,
+                "soa": {"mname": a.soa.mname, "rname": a.soa.rname, "serial": a.soa.serial},
+                "ns": a.ns.iter().map(|(name, ttl)| json!({"name": name, "ttl": ttl})).collect::<Vec<_>>(),
+            })),
             "caa": d.caa,
             "srv": d.srv,
             "ptr": d.ptr,
