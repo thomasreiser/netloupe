@@ -134,9 +134,21 @@ impl Dns01Evidence {
 #[derive(Debug, Clone)]
 pub struct Http01Evidence {
     pub status: Option<u16>,
-    /// Present only if the path returned a non-empty body (i.e. an
-    /// unusually long-lived or still-active challenge responder).
+    /// Present only if the path returned a non-empty body. This alone
+    /// isn't evidence of anything -- a 404 page, a WAF block page, or a
+    /// directory listing all return non-empty bodies too -- see
+    /// `looks_valid`.
     pub body_sample: Option<String>,
+    /// True only when `status` was 200 *and* the (untruncated) body is
+    /// exactly a well-formed RFC 8555 §8.3 key authorization
+    /// (`token.thumbprint`, both base64url, the thumbprint always
+    /// exactly 43 characters for the SHA-256 digest every current ACME
+    /// implementation uses) -- the one thing about an HTTP-01 response
+    /// that's actually checkable without knowing the specific token a
+    /// prior validation used. This is what the UI colors green; a
+    /// non-empty `body_sample` alone is not enough, since almost any web
+    /// server returns *something* for an unmatched path.
+    pub looks_valid: bool,
     pub error: Option<String>,
 }
 
@@ -292,6 +304,7 @@ async fn probe_http01(base_domain: &str, timeout: Duration) -> Http01Evidence {
             return Http01Evidence {
                 status: None,
                 body_sample: None,
+                looks_valid: false,
                 error: Some(err.to_string()),
             }
         }
@@ -299,25 +312,53 @@ async fn probe_http01(base_domain: &str, timeout: Duration) -> Http01Evidence {
 
     match client.get(&url).send().await {
         Ok(response) => {
-            let status = response.status().as_u16();
-            let body_sample = response
-                .text()
-                .await
-                .ok()
-                .filter(|b| !b.trim().is_empty())
-                .map(|b| b.chars().take(200).collect());
+            let status = response.status();
+            let body = response.text().await.ok().filter(|b| !b.trim().is_empty());
+            // Validated against the full body before truncating for
+            // display -- a body that happens to *start* with something
+            // valid-looking but has more content after it is not a real
+            // key authorization either.
+            let looks_valid =
+                status.as_u16() == 200 && body.as_deref().is_some_and(looks_like_key_authorization);
             Http01Evidence {
-                status: Some(status),
-                body_sample,
+                status: Some(status.as_u16()),
+                body_sample: body.map(|b| b.chars().take(200).collect()),
+                looks_valid,
                 error: None,
             }
         }
         Err(err) => Http01Evidence {
             status: None,
             body_sample: None,
+            looks_valid: false,
             error: Some(err.to_string()),
         },
     }
+}
+
+/// Whether `body` is exactly a well-formed RFC 8555 §8.3 key
+/// authorization (`token.thumbprint`) and nothing else. Rejects anything
+/// that isn't: an HTML error page, a directory listing, a WAF block
+/// page, or a server's default "not found" body all return non-empty,
+/// even HTTP-200, responses with no bearing on ACME whatsoever.
+fn looks_like_key_authorization(body: &str) -> bool {
+    let is_base64url = |s: &str| {
+        !s.is_empty()
+            && s.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    };
+    let Some((token, thumbprint)) = body.trim().split_once('.') else {
+        return false;
+    };
+    // The token's length isn't fixed by the spec beyond "at least 128
+    // bits of entropy" (~22 base64url characters); the thumbprint's is --
+    // a base64url-encoded SHA-256 digest, the only hash every current
+    // ACME implementation uses, is always exactly 43 characters with no
+    // padding.
+    (16..=128).contains(&token.len())
+        && is_base64url(token)
+        && thumbprint.len() == 43
+        && is_base64url(thumbprint)
 }
 
 /// Kept for callers that already have an `IpAddr` and want to confirm
@@ -334,6 +375,54 @@ pub fn domain_for_target(host_display: &str) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A real key authorization: a base64url token, one dot, a
+    /// base64url-encoded SHA-256 thumbprint (43 characters).
+    const VALID_KEY_AUTH: &str =
+        "IlirfxKKXA1zmR6PZgcQeidviYh3Sm8j5AnDT2lYlSU.9jg46WB3rR_AHD-EBXdN7cBkH1WOu0tA3M9fm21mqTI";
+
+    #[test]
+    fn looks_like_key_authorization_accepts_a_well_formed_response() {
+        assert!(looks_like_key_authorization(VALID_KEY_AUTH));
+        // A single trailing newline is common for a plain text file and
+        // shouldn't matter.
+        assert!(looks_like_key_authorization(&format!("{VALID_KEY_AUTH}\n")));
+    }
+
+    #[test]
+    fn looks_like_key_authorization_rejects_a_generic_web_page() {
+        assert!(!looks_like_key_authorization(
+            "<html><body>404 Not Found</body></html>"
+        ));
+        assert!(!looks_like_key_authorization(""));
+        assert!(!looks_like_key_authorization("Not Found"));
+    }
+
+    #[test]
+    fn looks_like_key_authorization_rejects_a_directory_listing() {
+        assert!(!looks_like_key_authorization(
+            "<a href=\"token1\">token1</a>\n<a href=\"token2\">token2</a>"
+        ));
+    }
+
+    #[test]
+    fn looks_like_key_authorization_rejects_a_wrong_length_thumbprint() {
+        // Right shape (token.thumbprint), but the second half isn't a
+        // real 43-character SHA-256 thumbprint.
+        assert!(!looks_like_key_authorization(
+            "IlirfxKKXA1zmR6PZgcQeidviYh3Sm8j5AnDT2lYlSU.short"
+        ));
+    }
+
+    #[test]
+    fn looks_like_key_authorization_rejects_extra_content_around_a_valid_looking_body() {
+        assert!(!looks_like_key_authorization(&format!(
+            "prefix {VALID_KEY_AUTH}"
+        )));
+        assert!(!looks_like_key_authorization(&format!(
+            "{VALID_KEY_AUTH} suffix"
+        )));
+    }
 
     #[test]
     fn classifies_lets_encrypt() {
