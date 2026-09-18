@@ -40,6 +40,25 @@ pub fn render(frame: &mut Frame, area: Rect, tab: &TabState) {
         return;
     };
 
+    // The zone tree gets a fixed right-hand column on any reasonably wide
+    // terminal; a narrower one just keeps the pane's full width for its
+    // main content, the same as before this section existed.
+    const TREE_WIDTH: u16 = 32;
+    const MIN_WIDTH_FOR_TREE: u16 = 90;
+    let (body, tree_area) = if body.width >= MIN_WIDTH_FOR_TREE {
+        let split = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Min(0), Constraint::Length(TREE_WIDTH)])
+            .spacing(1)
+            .split(body);
+        (split[0], Some(split[1]))
+    } else {
+        (body, None)
+    };
+    if let Some(tree_area) = tree_area {
+        render_zone_tree(frame, tree_area, dns);
+    }
+
     // Nameservers get their own section below, so they're excluded here
     // rather than shown twice.
     let mut record_rows: Vec<RecordRow> = Vec::new();
@@ -413,6 +432,93 @@ fn render_discovery(
 /// from `CheckId::Whois`, a separate check reused here the same way
 /// `CheckId::AltNames` feeds the CT log line above, since it's not a
 /// pane of its own.
+/// One node of the zone tree: its name, and whether it's a known
+/// delegation boundary (a zone the delegation trace actually queried a
+/// nameserver for) rather than just a plain label between one.
+fn build_zone_tree_nodes(dns: &crate::checks::dns::DnsResult) -> Vec<(String, bool)> {
+    let full_name = dns.queried_name.trim_end_matches('.').to_ascii_lowercase();
+    if full_name.is_empty() {
+        return Vec::new();
+    }
+    let labels: Vec<&str> = full_name.split('.').collect();
+    let known_zones: std::collections::HashSet<String> = dns
+        .delegation_trace
+        .iter()
+        .map(|h| h.zone.trim_end_matches('.').to_ascii_lowercase())
+        .collect();
+
+    (1..=labels.len())
+        .map(|n| {
+            let node = labels[labels.len() - n..].join(".");
+            let is_zone_cut = known_zones.contains(&node);
+            (node, is_zone_cut)
+        })
+        .collect()
+}
+
+/// A compact visual chain from the TLD down to the exact hostname being
+/// inspected, shown in a fixed-width column to the right of the pane's
+/// main content: the delegation trace's actual zone cuts (bold) plus any
+/// remaining plain labels (dim) down to the queried name (highlighted).
+fn render_zone_tree(frame: &mut Frame, area: Rect, dns: &crate::checks::dns::DnsResult) {
+    let block = theme::panel("Zone tree", theme::pane_accent(crate::app::Pane::Dns));
+    let inner = block.inner(area).inner(ratatui::layout::Margin::new(1, 0));
+    frame.render_widget(block, area);
+
+    let nodes = build_zone_tree_nodes(dns);
+    let Some(last_index) = nodes.len().checked_sub(1) else {
+        return;
+    };
+    let width = inner.width as usize;
+
+    let mut lines: Vec<Line> = Vec::new();
+    for (i, (node, is_zone_cut)) in nodes.iter().enumerate() {
+        let is_current = i == last_index;
+        // A leading marker, not a trailing "(NS)"/"this host" suffix:
+        // truncation (below) only ever cuts the *end* of a line, so a
+        // suffix would silently vanish for exactly the long names this
+        // most needs to flag, while a marker up front always survives.
+        let marker = if is_current {
+            "▸"
+        } else if *is_zone_cut {
+            "●"
+        } else {
+            " "
+        };
+        let indent = " ".repeat(i);
+        let text = truncate_for_tree(&format!("{marker} {indent}{node}"), width);
+        let style = if is_current || *is_zone_cut {
+            Style::default()
+                .fg(theme::YELLOW)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(theme::YELLOW)
+        };
+        lines.push(Line::from(Span::styled(text, style)));
+    }
+
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
+/// Truncates `text` to at most `width` visible characters (marking the
+/// cut with an ellipsis) instead of letting `Paragraph` word-wrap it --
+/// generic word-wrap would split a tree line's leading marker/indent from
+/// its name onto a fresh, unindented continuation line for any name too
+/// long to fit, breaking the tree's visual structure rather than just
+/// trimming it.
+fn truncate_for_tree(text: &str, width: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
+    if text.chars().count() <= width {
+        return text.to_string();
+    }
+    let keep = width.saturating_sub(1);
+    let mut truncated: String = text.chars().take(keep).collect();
+    truncated.push('…');
+    truncated
+}
+
 fn render_whois(lines: &mut Vec<Line<'static>>, tab: &TabState) {
     let slot = tab.slot(CheckId::Whois);
     let Some(CheckUpdate::Whois(whois)) = &slot.update else {
@@ -529,5 +635,86 @@ fn render_delegation_trace(lines: &mut Vec<Line<'static>>, dns: &crate::checks::
             ),
             Span::styled(detail, Style::default().fg(theme::TEXT)),
         ]));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::*;
+    use crate::checks::dns::{DelegationHop, DnsResult};
+
+    fn dns_result_for(queried_name: &str, delegation_trace: Vec<DelegationHop>) -> DnsResult {
+        DnsResult {
+            queried_name: queried_name.to_string(),
+            delegation_trace,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn build_zone_tree_nodes_marks_delegation_trace_zones_as_zone_cuts() {
+        let dns = dns_result_for(
+            "admin.ft.europe.d3vw-i.com",
+            vec![
+                DelegationHop {
+                    zone: "com.".to_string(),
+                    answered_by: "a.root-servers.net (198.41.0.4)".to_string(),
+                    delegates_to: vec!["a.gtld-servers.net.".to_string()],
+                    rtt: Duration::from_millis(1),
+                },
+                DelegationHop {
+                    zone: "d3vw-i.com.".to_string(),
+                    answered_by: "a.gtld-servers.net. (192.5.6.30)".to_string(),
+                    delegates_to: Vec::new(),
+                    rtt: Duration::from_millis(1),
+                },
+            ],
+        );
+        let nodes = build_zone_tree_nodes(&dns);
+        assert_eq!(
+            nodes,
+            vec![
+                ("com".to_string(), true),
+                ("d3vw-i.com".to_string(), true),
+                ("europe.d3vw-i.com".to_string(), false),
+                ("ft.europe.d3vw-i.com".to_string(), false),
+                ("admin.ft.europe.d3vw-i.com".to_string(), false),
+            ]
+        );
+    }
+
+    #[test]
+    fn build_zone_tree_nodes_handles_a_bare_apex_with_no_trace_data() {
+        let dns = dns_result_for("example.com", Vec::new());
+        let nodes = build_zone_tree_nodes(&dns);
+        assert_eq!(
+            nodes,
+            vec![
+                ("com".to_string(), false),
+                ("example.com".to_string(), false),
+            ]
+        );
+    }
+
+    #[test]
+    fn build_zone_tree_nodes_is_empty_for_an_empty_queried_name() {
+        let dns = dns_result_for("", Vec::new());
+        assert!(build_zone_tree_nodes(&dns).is_empty());
+    }
+
+    #[test]
+    fn truncate_for_tree_leaves_short_text_untouched() {
+        assert_eq!(truncate_for_tree("▸ com", 20), "▸ com".to_string());
+    }
+
+    #[test]
+    fn truncate_for_tree_marks_a_cut_with_an_ellipsis_and_keeps_the_leading_marker() {
+        let text = "▸ admin.ft.europe.example.com";
+        let truncated = truncate_for_tree(text, 10);
+        assert_eq!(truncated.chars().count(), 10);
+        assert!(truncated.starts_with('▸'));
+        assert!(truncated.ends_with('…'));
     }
 }
