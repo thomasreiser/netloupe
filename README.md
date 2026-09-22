@@ -8,13 +8,9 @@ provider detection, geolocation, and reputation checks in parallel and
 shows the results in panes, with evidence behind every conclusion. Each
 host gets its own tab, so several can be inspected side by side.
 
-```
-[ example.com ] [ 8.8.8.8 ] [ mail.foo.de ] [+]
- Overview │ DNS │ Mail │ Ping/Trace │ Ports │ TLS │ HTTP │ IP/ASN │ Hosting │ Geo │ Rep
-```
-
-See `CLAUDE.md` for the full design (panes, the hosting-detection engine
-and its signature file format, architecture rules, roadmap).
+![Overview](ss3.png)
+![DNS view](ss1.png)
+![Geo view](ss2.png)
 
 ## Install / run
 
@@ -88,16 +84,3 @@ cargo fmt --all
 cargo xtask lint-signatures         # validate data/providers/*.toml
 cargo xtask update-data             # regenerate the bundled data/snapshot/
 ```
-
-## Status
-
-Implements the roadmap's MVP and phase-2/3/4 panes (DNS, Ping/Trace,
-Overview, IP/ASN, Hosting, Mail, TLS, HTTP, Geo, Rep) plus headless
-`check --json` and the opt-in Ports scan. Traceroute uses a real ICMP
-hop-by-hop trace when a raw socket is available (root, `CAP_NET_RAW`, or
-Linux's unprivileged `ping_group_range`), falling back to a TCP-connect
-TTL sweep otherwise — that can only say how many hops away the target is,
-not which routers are in between, and the pane says so plainly. RPKI
-route-origin validation (via RIPEstat's public validator, which covers
-global RPKI data, not just RIPE's own region) shows in the `IP/ASN`
-pane once an origin AS and prefix are known.
